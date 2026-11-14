@@ -1,0 +1,51 @@
+"""
+Agentic Cloud - Phase 1, Step 1.3
+Loads config.yaml and builds the environment variables passed to agent containers.
+
+Config path: $AGENTIC_CONFIG if set, otherwise <repo root>/config.yaml
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_config(path: str | os.PathLike | None = None) -> dict[str, Any]:
+    cfg_path = Path(path or os.environ.get("AGENTIC_CONFIG") or REPO_ROOT / "config.yaml")
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"config file not found: {cfg_path}")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    for section in ("postgres", "docker", "control_plane", "lifecycle", "llm"):
+        if section not in cfg:
+            raise KeyError(f"config.yaml is missing the '{section}' section")
+    return cfg
+
+
+def agent_env(cfg: dict[str, Any]) -> dict[str, str]:
+    """Environment variables every agent container receives (same for all sessions).
+
+    Per-session variables (SESSION_ID, REQUESTED_AT_MS) are added by the Docker driver.
+    """
+    llm = cfg["llm"]
+    ollama = llm.get("ollama", {}) or {}
+    env = {
+        "AGENT_DSN": cfg["postgres"]["container_dsn"],
+        "PORT": str(cfg["docker"]["agent_internal_port"]),
+        "LLM_PROVIDER": str(llm.get("provider", "mock")),
+        "OLLAMA_BASE_URL": str(ollama.get("base_url", "http://host.docker.internal:11434")),
+        "OLLAMA_MODEL": str(ollama.get("model", "llama3.2:3b")),
+        "OLLAMA_TEMPERATURE": str(ollama.get("temperature", 0.2)),
+        "OLLAMA_TIMEOUT_S": str(ollama.get("timeout_s", 120)),
+        "LOG_LEVEL": str(cfg.get("logging", {}).get("level", "INFO")),
+    }
+    if "mock_latency_ms" in llm:
+        env["MOCK_LATENCY_MS"] = str(llm["mock_latency_ms"])
+    return env

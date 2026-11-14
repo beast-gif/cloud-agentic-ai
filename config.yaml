@@ -1,0 +1,66 @@
+# Agentic Cloud - Phase 1 configuration
+# Read by the control plane (host) and passed to agent containers as environment variables.
+
+project:
+  name: agentic-cloud
+  phase: 1
+
+# ---------------------------------------------------------------------------
+# Postgres (started by docker-compose.yml)
+# ---------------------------------------------------------------------------
+postgres:
+  db: agentic_cloud
+  user: agentic
+  password: agentic_dev_pw
+  # Control plane runs on the host -> reaches Postgres through the published port
+  host_dsn: postgresql://agentic:agentic_dev_pw@localhost:5432/agentic_cloud
+  # Agent containers run on the agentic-net network -> reach Postgres by service name
+  container_dsn: postgresql://agentic:agentic_dev_pw@postgres:5432/agentic_cloud
+
+# ---------------------------------------------------------------------------
+# Docker settings for agent containers
+# ---------------------------------------------------------------------------
+docker:
+  network: agentic-net              # must match the network name in docker-compose.yml
+  agent_image: agentic-cloud/agent:phase1
+  agent_internal_port: 8080         # FastAPI port inside every agent container
+  bind_host: 127.0.0.1              # published ports only on localhost
+  label: agentic-cloud.session      # label put on every agent container (for cleanup)
+  memory_limit: 512m                # per-agent RAM limit (same as our snapshot math)
+  cpu_limit: 1.0                    # 1 vCPU per agent
+
+# ---------------------------------------------------------------------------
+# Control plane API
+# ---------------------------------------------------------------------------
+control_plane:
+  host: 127.0.0.1
+  port: 8000
+
+# ---------------------------------------------------------------------------
+# Session lifecycle (freeze / wake)
+# ---------------------------------------------------------------------------
+lifecycle:
+  idle_timeout_s: 30                # WAITING longer than this -> freeze (stop container)
+  reaper_interval_s: 5              # how often the idle reaper checks
+  health_timeout_s: 60              # max time to wait for a new container's /health
+  health_poll_ms: 100               # /health polling interval (sets wake-time resolution)
+
+# ---------------------------------------------------------------------------
+# LLM used by the demo agent
+#   provider: mock   -> no LLM, deterministic fake answers (test the infrastructure only)
+#   provider: ollama -> local model through Ollama running on your host
+# ---------------------------------------------------------------------------
+llm:
+  provider: mock
+  ollama:
+    # host.docker.internal = your Windows host, as seen from inside a Docker Desktop container
+    base_url: http://host.docker.internal:11434
+    model: llama3.1:8b
+    temperature: 0.2
+    timeout_s: 120
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  level: INFO

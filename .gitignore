@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------
+# Agentic Cloud - .gitignore
+# ---------------------------------------------------------------
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Virtual environments ----
+venv/
+.venv/
+env/
+ENV/
+
+# ---- Secrets / local overrides ----
+.env
+.env.*
+!.env.example
+*.local.yaml
+config.local.yaml
+
+# ---- Benchmark outputs ----
+# Raw per-run CSVs are large and machine-specific -> not committed.
+# The JSON summaries are small and are your baselines -> committed.
+benchmarks/results/*.csv
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Phase 5 (Firecracker): snapshots, kernels, rootfs images are huge ----
+*.snap
+*.vmstate
+*.mem
+*.ext4
+*.img
+vmlinux*
