@@ -1,11 +1,18 @@
 """
-Agentic Cloud - Phase 1, Step 1.3
+Agentic Cloud - Phase 1, Step 1.3 (updated in Phase 2, Step 2.3: L2 workspace volumes)
 Docker Driver: the ONLY part of the control plane that knows agents are Docker containers.
 
   start()        docker run  (one container per session, random localhost port)
+                 + mounts the session's workspace volume ws-<session_id> at /workspace
   wait_healthy() poll GET /health until 200 (readiness), fail fast on crash/error
-  stop()         docker stop + rm  (= FREEZE in Phase 1)
+  stop()         docker stop + rm  (= FREEZE in Phase 1) - the workspace volume is NOT removed
   list_managed() containers carrying our label (for reconciliation / cleanup)
+
+L2 workspace (Phase 2):
+  ensure_workspace()      create ws-<session_id> if missing (labelled like the containers)
+  delete_workspace()      remove the volume (only when the session is finished)
+  list_workspaces()       all workspace volumes we manage
+  list_workspace_files()  list (and optionally read) files in a volume, even while FROZEN
 
 In Phase 5 this file is replaced by a Firecracker driver with the same methods
 (start = clone golden.snap, stop = snapshot), and the rest of the control plane stays.
@@ -13,6 +20,7 @@ In Phase 5 this file is replaced by a Firecracker driver with the same methods
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -33,6 +41,8 @@ class StartResult:
     host_port: int
     requested_at_ms: float      # epoch ms just before `docker run` (also sent to the agent)
     run_returned_ms: float      # how long the docker run API call itself took
+    workspace: str = ""         # name of the mounted workspace volume
+    workspace_created: bool = False  # True on the first start of a session, False on wakes
 
 
 @dataclass
@@ -57,7 +67,11 @@ class DockerDriver:
         health_timeout_s: float = 60.0,
         health_poll_ms: float = 100.0,
         base_env: Optional[dict[str, str]] = None,
+        workspace_mount: str = "/workspace",
+        workspace_prefix: str = "ws-",
     ) -> None:
+        self.workspace_mount = workspace_mount
+        self.workspace_prefix = workspace_prefix
         self.image = image
         self.network = network
         self.internal_port = internal_port
@@ -75,7 +89,10 @@ class DockerDriver:
     @classmethod
     def from_config(cls, cfg: dict, base_env: dict[str, str]) -> "DockerDriver":
         d, lc = cfg["docker"], cfg["lifecycle"]
+        ws = cfg.get("workspace") or {}
         return cls(
+            workspace_mount=ws.get("mount_path", "/workspace"),
+            workspace_prefix=ws.get("volume_prefix", "ws-"),
             image=d["agent_image"],
             network=d["network"],
             internal_port=int(d["agent_internal_port"]),
@@ -125,12 +142,16 @@ class DockerDriver:
         name = self.container_name(session_id)
         self._remove_if_exists(name)  # leftover from a crash -> remove before reusing the name
 
+        # L2: same volume on every start of this session -> files survive freeze/wake
+        workspace, workspace_created = self.ensure_workspace(session_id)
+
         requested_at_ms = time.time() * 1000.0
         env = {
             **self.base_env,
             **(extra_env or {}),
             "SESSION_ID": session_id,
             "REQUESTED_AT_MS": f"{requested_at_ms:.1f}",
+            "WORKSPACE_DIR": self.workspace_mount,
         }
 
         t0 = time.perf_counter()
@@ -145,6 +166,7 @@ class DockerDriver:
             labels={self.label: session_id},
             mem_limit=self.memory_limit,
             nano_cpus=self.nano_cpus,
+            volumes={workspace: {"bind": self.workspace_mount, "mode": "rw"}},
         )
         run_returned_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -159,6 +181,8 @@ class DockerDriver:
             host_port=host_port,
             requested_at_ms=requested_at_ms,
             run_returned_ms=round(run_returned_ms, 1),
+            workspace=workspace,
+            workspace_created=workspace_created,
         )
 
     def _host_port(self, container, attempts: int = 20) -> int:
@@ -269,6 +293,108 @@ class DockerDriver:
                 "status": c.status,
             })
         return out
+
+    # ================================================================ L2 workspace volumes
+
+    def workspace_name(self, session_id: str) -> str:
+        return f"{self.workspace_prefix}{session_id}"
+
+    def ensure_workspace(self, session_id: str) -> tuple[str, bool]:
+        """Return (volume name, created_now). Creates ws-<session_id> on the first start only.
+
+        A brand-new named volume is filled by Docker from the image's /workspace directory
+        on first mount, INCLUDING its owner - that is why the Dockerfile creates /workspace
+        owned by the non-root `agent` user.
+        """
+        name = self.workspace_name(session_id)
+        try:
+            self.client.volumes.get(name)
+            return name, False
+        except NotFound:
+            self.client.volumes.create(name=name, labels={self.label: session_id})
+            log.info("created workspace volume %s", name)
+            return name, True
+
+    def delete_workspace(self, session_id: str) -> bool:
+        """Remove ws-<session_id>. Returns True if a volume was removed.
+
+        Must only be called when no container uses the volume (session finished).
+        """
+        name = self.workspace_name(session_id)
+        try:
+            self.client.volumes.get(name).remove(force=True)
+            log.info("deleted workspace volume %s", name)
+            return True
+        except NotFound:
+            return False
+        except APIError as exc:  # e.g. still mounted by a container
+            log.warning("could not delete %s: %s", name, exc)
+            return False
+
+    def list_workspaces(self) -> list[dict]:
+        out = []
+        for v in self.client.volumes.list(filters={"label": self.label}):
+            labels = v.attrs.get("Labels") or {}
+            out.append({
+                "name": v.name,
+                "session_id": labels.get(self.label),
+                "created_at": v.attrs.get("CreatedAt"),
+            })
+        return out
+
+    # Runs inside a short-lived helper container that mounts the volume read-only.
+    _LIST_SCRIPT = r"""
+import json, os, sys
+root, with_content, max_bytes = sys.argv[1], sys.argv[2] == "1", int(sys.argv[3])
+files = []
+for dirpath, _, names in os.walk(root):
+    for n in sorted(names):
+        p = os.path.join(dirpath, n)
+        st = os.stat(p)
+        item = {"path": os.path.relpath(p, root), "bytes": st.st_size, "mtime": st.st_mtime}
+        if with_content and st.st_size <= max_bytes:
+            try:
+                with open(p, encoding="utf-8") as f:
+                    item["content"] = f.read()
+            except UnicodeDecodeError:
+                item["content"] = None
+        files.append(item)
+print(json.dumps(files))
+"""
+
+    def list_workspace_files(self, session_id: str, with_content: bool = False,
+                             max_bytes: int = 65536) -> list[dict]:
+        """List files in a session's workspace volume - works even when the session is FROZEN.
+
+        Starts a throwaway helper container from the agent image (already on this machine),
+        mounts the volume READ-ONLY, prints a JSON listing, and is removed automatically.
+        Debug/inspection only (~1 s).
+        """
+        name = self.workspace_name(session_id)
+        try:
+            self.client.volumes.get(name)
+        except NotFound:
+            raise FileNotFoundError(f"workspace volume {name} does not exist")
+
+        # Run detached, wait, read logs, remove - instead of run(remove=True), whose return
+        # value can be None depending on the Docker logging driver (seen on Docker Desktop).
+        helper = self.client.containers.run(
+            self.image,
+            command=["python", "-c", self._LIST_SCRIPT, "/mnt/ws",
+                     "1" if with_content else "0", str(max_bytes)],
+            volumes={name: {"bind": "/mnt/ws", "mode": "ro"}},
+            network_disabled=True,
+            detach=True,
+        )
+        try:
+            status = helper.wait(timeout=60).get("StatusCode", 1)
+            out = helper.logs(stdout=True, stderr=False) or b""
+            if status != 0:
+                err = (helper.logs(stdout=False, stderr=True) or b"").decode("utf-8", errors="replace")
+                raise RuntimeError(f"workspace listing failed (exit {status}): {err[-500:]}")
+        finally:
+            helper.remove(force=True)
+        return json.loads(out.decode("utf-8").strip() or "[]")
 
     # ================================================================ helpers
 

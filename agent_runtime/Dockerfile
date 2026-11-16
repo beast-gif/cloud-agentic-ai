@@ -18,10 +18,17 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # Agent code
-COPY llm.py tools.py graph.py server.py ./
+COPY llm.py tools.py memory_client.py graph.py server.py ./
 
 # Run as a non-root user
 RUN useradd --create-home --uid 10001 agent
+
+# Phase 2 (L2): workspace mount point, owned by the agent user.
+# When Docker mounts a NEW empty named volume here, it copies this directory's
+# ownership into the volume - so the non-root agent can write to it.
+RUN mkdir -p /workspace && chown agent:agent /workspace
+ENV WORKSPACE_DIR=/workspace
+
 USER agent
 
 EXPOSE 8080

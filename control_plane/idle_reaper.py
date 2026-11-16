@@ -6,6 +6,8 @@ Every `interval_s` seconds:
   1. find WAITING sessions idle longer than idle_timeout_s -> manager.freeze()
   2. every `liveness_every` ticks: check WAITING containers still answer /health;
      dead ones -> FROZEN (their memory is safe in the Postgres checkpoint)
+  3. every `workspace_gc_every` ticks (Phase 2): delete workspace volumes of sessions
+     that finished more than keep_after_complete_s ago, and orphan volumes
 
 Timing math (defaults: idle_timeout_s=30, interval_s=5):
   a session that went idle at t is frozen at the first tick after t + 30 s,
@@ -32,12 +34,15 @@ class IdleReaper:
         idle_timeout_s: float = 30.0,
         interval_s: float = 5.0,
         liveness_every: int = 6,
+        workspace_gc_every: int = 12,
     ) -> None:
         self.manager = manager
         self.store = store
         self.idle_timeout_s = idle_timeout_s
         self.interval_s = interval_s
         self.liveness_every = max(1, liveness_every)
+        self.workspace_gc_every = max(1, workspace_gc_every)
+        self.workspaces_deleted_total = 0
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -82,6 +87,9 @@ class IdleReaper:
                     self.lost_total += lost
                     log.warning("liveness: %d dead agent(s) moved to FROZEN", lost)
 
+            if self.ticks % self.workspace_gc_every == 0:
+                self.workspaces_deleted_total += len(self.manager.gc_workspaces())
+
             self.last_error = None
         except Exception as exc:  # noqa: BLE001  (never let the loop die)
             self.last_error = repr(exc)
@@ -97,6 +105,7 @@ class IdleReaper:
             "ticks": self.ticks,
             "frozen_total": self.frozen_total,
             "lost_total": self.lost_total,
+            "workspaces_deleted_total": self.workspaces_deleted_total,
             "last_tick_ms": self.last_tick_ms,
             "last_error": self.last_error,
         }

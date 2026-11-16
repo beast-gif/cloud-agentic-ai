@@ -1,5 +1,5 @@
 """
-Agentic Cloud - Phase 1, Step 1.3
+Agentic Cloud - Phase 1, Step 1.3 (updated in Phase 2, Step 2.2: MEMORY_API_URL)
 Loads config.yaml and builds the environment variables passed to agent containers.
 
 Config path: $AGENTIC_CONFIG if set, otherwise <repo root>/config.yaml
@@ -45,6 +45,10 @@ def agent_env(cfg: dict[str, Any]) -> dict[str, str]:
         "OLLAMA_TEMPERATURE": str(ollama.get("temperature", 0.2)),
         "OLLAMA_TIMEOUT_S": str(ollama.get("timeout_s", 120)),
         "LOG_LEVEL": str(cfg.get("logging", {}).get("level", "INFO")),
+        # Phase 2: where the agent reaches the control plane's Memory API.
+        # The per-session MEMORY_TOKEN is added by the lifecycle on every container start.
+        "MEMORY_API_URL": str(cfg["control_plane"].get("agent_facing_url",
+                                                       "http://host.docker.internal:8000")),
     }
     if "mock_latency_ms" in llm:
         env["MOCK_LATENCY_MS"] = str(llm["mock_latency_ms"])

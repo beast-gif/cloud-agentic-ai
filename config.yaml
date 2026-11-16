@@ -1,9 +1,9 @@
-# Agentic Cloud - Phase 1 configuration
+# Agentic Cloud configuration (Phase 1 + Phase 2)
 # Read by the control plane (host) and passed to agent containers as environment variables.
 
 project:
   name: agentic-cloud
-  phase: 1
+  phase: 2
 
 # ---------------------------------------------------------------------------
 # Postgres (started by docker-compose.yml)
@@ -35,6 +35,9 @@ docker:
 control_plane:
   host: 127.0.0.1
   port: 8000
+  # How AGENT CONTAINERS reach the control plane (Memory API).
+  # host.docker.internal = your Windows host as seen from inside a Docker Desktop container.
+  agent_facing_url: http://host.docker.internal:8000
 
 # ---------------------------------------------------------------------------
 # Session lifecycle (freeze / wake)
@@ -58,6 +61,45 @@ llm:
     model: llama3.1:8b
     temperature: 0.2
     timeout_s: 120
+
+# ---------------------------------------------------------------------------
+# Phase 2: long-term memory (L3)
+#   The CONTROL PLANE computes embeddings (agents never do), so Ollama's URL here is
+#   as seen from the host: localhost, not host.docker.internal.
+#
+#   min_score       : recall threshold (cosine similarity). It depends on the model:
+#                     hashing vectors of related texts score much lower than real
+#                     semantic embeddings, so each provider has its own value.
+#   dedup_threshold : a new memory this similar to an existing one is treated as the
+#                     same fact (merged instead of inserted).
+# ---------------------------------------------------------------------------
+memory:
+  embeddings:
+    provider: mock                  # mock | ollama
+    dim: 768                        # must match vector(768) in db/migrations/002_memory.sql
+    mock:
+      min_score: 0.25
+      dedup_threshold: 0.95
+    ollama:
+      base_url: http://localhost:11434
+      model: nomic-embed-text
+      timeout_s: 60
+      use_prefixes: true            # "search_document: " / "search_query: " (nomic task prefixes)
+      min_score: 0.60
+      dedup_threshold: 0.95
+
+# ---------------------------------------------------------------------------
+# Phase 2: L2 workspace (one Docker volume per session, mounted on every start)
+#   keep_after_complete_s : keep a finished session's files this long (for inspection),
+#                           then the reaper deletes the volume. 0 = delete immediately.
+#   gc_every_ticks        : how often the reaper runs workspace GC
+#                           (12 ticks x reaper_interval_s 5 s = every 60 s)
+# ---------------------------------------------------------------------------
+workspace:
+  mount_path: /workspace
+  volume_prefix: ws-
+  keep_after_complete_s: 3600
+  gc_every_ticks: 12
 
 # ---------------------------------------------------------------------------
 # Logging

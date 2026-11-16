@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 import httpx
 
+from control_plane.auth import SessionAuth
 from control_plane.docker_driver import DockerDriver
 from control_plane.session_store import (
     COMPLETED, FAILED, FREEZING, FROZEN, RUNNING, STARTING, TERMINAL_STATES, WAITING, WAKING,
@@ -57,10 +58,15 @@ def _ms(t0: float) -> float:
 
 
 class SessionManager:
-    def __init__(self, cfg: dict, store: SessionStore, driver: DockerDriver) -> None:
+    def __init__(self, cfg: dict, store: SessionStore, driver: DockerDriver,
+                 auth: Optional[SessionAuth] = None) -> None:
         self.store = store
         self.driver = driver
+        # Phase 2: issues a fresh Memory-API token on every container start
+        self.auth = auth
         self.idle_timeout_s = float(cfg["lifecycle"]["idle_timeout_s"])
+        # Phase 2 (L2): how long a FINISHED session's workspace volume is kept for inspection
+        self.workspace_keep_s = float((cfg.get("workspace") or {}).get("keep_after_complete_s", 3600))
 
         # agent calls can include several LLM calls -> generous read timeout
         llm_timeout = float((cfg["llm"].get("ollama") or {}).get("timeout_s", 120))
@@ -70,7 +76,8 @@ class SessionManager:
         self._locks_guard = threading.Lock()
         self._stats_lock = threading.Lock()
         self.stats = {"cold_starts": 0, "wakes": 0, "fast_path_events": 0,
-                      "freezes": 0, "lost": 0, "failures": 0, "cleanups": 0}
+                      "freezes": 0, "lost": 0, "failures": 0, "cleanups": 0,
+                      "workspaces_deleted": 0}
 
         # Background workers that stop containers of finished sessions, so the user's
         # response does not wait for `docker stop` (~1 s).
@@ -252,16 +259,60 @@ class SessionManager:
                 self.driver.stop(c["container_id"])
                 report["orphans_removed"].append(c["name"])
 
+        # L2: remove workspace volumes of finished/unknown sessions (respecting retention)
+        report["workspaces_deleted"] = self.gc_workspaces()
+
         log.info("reconcile: %s", {k: len(v) for k, v in report.items()})
         return report
+
+    # ================================================================ L2 workspace garbage collection
+
+    def gc_workspaces(self, older_than_s: Optional[float] = None) -> list[str]:
+        """Delete workspace volumes that are no longer needed.
+
+        orphan (no session row)                                  -> delete now
+        session COMPLETED/FAILED, finished > keep_after_complete_s ago -> delete
+        session FROZEN / WAITING / RUNNING / ...                 -> KEEP (it will wake again)
+
+        older_than_s overrides the retention (e.g. 0 = delete all finished now).
+        """
+        keep_s = self.workspace_keep_s if older_than_s is None else float(older_than_s)
+        deleted: list[str] = []
+        for ws in self.driver.list_workspaces():
+            sid = ws["session_id"]
+            if not sid:
+                continue  # not one of ours (no session label)
+            row = self.store.get(sid)
+
+            if row is None:
+                reason = "orphan"
+            elif row["state"] in TERMINAL_STATES:
+                age_s = (time.time() - row["updated_at"].timestamp())
+                if age_s < keep_s:
+                    continue
+                reason = f"{row['state'].lower()} {age_s:.0f}s ago"
+            else:
+                continue  # session can still wake -> its files must stay
+
+            if self.driver.delete_workspace(sid):
+                deleted.append(ws["name"])
+                self._inc("workspaces_deleted")
+                if row is not None:
+                    self.store.log_event(sid, "workspace_deleted", {"volume": ws["name"], "reason": reason})
+        if deleted:
+            log.info("workspace gc: deleted %d volume(s)", len(deleted))
+        return deleted
 
     # ================================================================ internals
 
     def _start_container(self, session_id: str, from_state: str, kind: str) -> tuple[str, dict]:
         """Start a container, wait for /health, move from_state -> RUNNING. Returns (agent_url, timings)."""
         t0 = time.perf_counter()
+        # New token for every container (cold start AND wake): the previous container's
+        # token stops working the moment this one is issued.
+        extra_env = {"MEMORY_TOKEN": self.auth.issue(session_id)} if self.auth else None
         try:
-            started = self.driver.start(session_id)
+            started = self.driver.start(session_id, extra_env=extra_env)
         except Exception as exc:  # noqa: BLE001
             self.store.transition(session_id, from_state, FAILED, event="failed",
                                   payload={"stage": kind}, error=f"docker start failed: {exc!r}")
@@ -279,7 +330,8 @@ class SessionManager:
         row = self.store.transition(
             session_id, from_state, RUNNING,
             event="started" if kind == "cold_start" else "resumed",
-            payload={"agent_url": started.agent_url, "polls": health.polls},
+            payload={"agent_url": started.agent_url, "polls": health.polls,
+                     "workspace": started.workspace, "workspace_created": started.workspace_created},
             touch_active=True, container_id=started.container_id, agent_url=started.agent_url,
         )
         if row is None:
@@ -338,6 +390,8 @@ class SessionManager:
     def _release_container(self, session_id: str) -> None:
         """Stop the container of a finished session and clear its container fields."""
         try:
+            if self.auth:
+                self.auth.revoke(session_id)  # finished session: token no longer valid
             row = self.store.get(session_id)
             if row and row["container_id"]:
                 stop_ms = self.driver.stop(row["container_id"])
@@ -345,6 +399,13 @@ class SessionManager:
                                       event="cleaned_up", payload={"stop_ms": stop_ms},
                                       container_id=None, agent_url=None)
                 self._inc("cleanups")
+            # L2: retention 0 -> delete the workspace right away; otherwise the reaper's
+            # periodic gc_workspaces() removes it after keep_after_complete_s.
+            if self.workspace_keep_s <= 0 and self.driver.delete_workspace(session_id):
+                self._inc("workspaces_deleted")
+                self.store.log_event(session_id, "workspace_deleted",
+                                     {"volume": self.driver.workspace_name(session_id),
+                                      "reason": "retention 0"})
         except Exception:  # noqa: BLE001  (background thread: log, never crash)
             log.exception("cleanup of %s failed", session_id)
 
@@ -352,8 +413,10 @@ class SessionManager:
     def _response(session: dict, res: dict, timings: Optional[dict], total_ms: float, path: str) -> dict:
         return {
             "path": path,  # cold_start | fast | wake
-            "session": session,
+            # never expose the token hash through the API
+            "session": {k: v for k, v in (session or {}).items() if k != "token_hash"},
             "agent": {k: res.get(k) for k in
-                      ("status", "waiting_for", "data", "error", "run_ms", "checkpoint_load_ms", "llm")},
+                      ("status", "waiting_for", "data", "error", "run_ms", "checkpoint_load_ms",
+                       "llm", "memory")},
             "timings_ms": {**(timings or {}), "total_ms": total_ms},
         }

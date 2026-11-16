@@ -26,6 +26,9 @@ Environment variables (set by the control plane in Step 1.3):
   OLLAMA_TIMEOUT_S    default 120
   MOCK_LATENCY_MS     default 150 (fake LLM delay per call)
   LOG_LEVEL           default INFO
+  MEMORY_API_URL      Phase 2: control plane Memory API (L3)
+  MEMORY_TOKEN        Phase 2: this container's session token (rotated on every wake)
+  WORKSPACE_DIR       Phase 2: L2 workspace mount, default /workspace
 """
 
 # ---- timing starts before ANY other import ---------------------------------
@@ -78,6 +81,7 @@ class Runtime:
         self.graph = None
         self.pool = None
         self.llm = None
+        self.memory = None
         self.Command = None
         self.timings: dict[str, Any] = {}
 
@@ -98,8 +102,9 @@ def _init_agent() -> None:
         from langgraph.checkpoint.postgres import PostgresSaver
         from langgraph.types import Command
 
-        from agent_runtime.graph import build_graph
-        from agent_runtime.llm import LLM
+        from graph import build_graph
+        from llm import LLM
+        from memory_client import MemoryClient
         t1 = time.perf_counter()
 
         # Stage 2: connect to Postgres + make sure checkpoint tables exist
@@ -125,7 +130,14 @@ def _init_agent() -> None:
             timeout_s=float(os.environ.get("OLLAMA_TIMEOUT_S", "120")),
             mock_latency_ms=float(os.environ.get("MOCK_LATENCY_MS", "150")),
         )
-        graph = build_graph(llm, checkpointer)
+        memory = MemoryClient(
+            base_url=os.environ.get("MEMORY_API_URL", ""),
+            token=os.environ.get("MEMORY_TOKEN", ""),
+        )
+        graph = build_graph(
+            llm, checkpointer, memory=memory,
+            workspace_dir=os.environ.get("WORKSPACE_DIR", "/workspace"),
+        )
         t3 = time.perf_counter()
 
         container_start_ms = (
@@ -133,6 +145,7 @@ def _init_agent() -> None:
         )
 
         RT.pool, RT.llm, RT.graph, RT.Command = pool, llm, graph, Command
+        RT.memory = memory
         RT.timings = {
             # docker run requested -> python process started (host and VM clocks may differ slightly)
             "container_start_ms": container_start_ms,
@@ -161,6 +174,8 @@ async def lifespan(_: FastAPI):
     # graceful shutdown (docker stop sends SIGTERM -> uvicorn -> here)
     if RT.llm is not None:
         RT.llm.close()
+    if RT.memory is not None:
+        RT.memory.close()
     if RT.pool is not None:
         RT.pool.close()
     log.info("agent shut down")
@@ -197,6 +212,7 @@ def _result(thread_id: str, run_ms: float, checkpoint_load_ms: Optional[float] =
         "run_ms": run_ms,
         "checkpoint_load_ms": checkpoint_load_ms,
         "llm": RT.llm.stats(),
+        "memory": RT.memory.stats(),
     }
 
     if snap.next:  # graph paused -> waiting for a human
@@ -214,7 +230,13 @@ def _result(thread_id: str, run_ms: float, checkpoint_load_ms: Optional[float] =
         **common,
         "status": "completed",
         "waiting_for": None,
-        "data": {"report": values.get("report"), "summaries": values.get("summaries", [])},
+        "data": {
+            "report": values.get("report"),
+            "summaries": values.get("summaries", []),
+            "skipped_already_read": values.get("skipped_already_read", []),
+            "workspace_files": values.get("workspace_files", []),
+            "memories_written": values.get("memories_written", []),
+        },
     }
 
 
