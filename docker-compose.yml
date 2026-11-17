@@ -1,20 +1,23 @@
-# Agentic Cloud - Phase 2, Step 2.1
-# Shared infrastructure: Postgres 16 WITH the pgvector extension
-# (sessions table + LangGraph checkpoints + long-term memory vectors).
+# Agentic Cloud - Phase 3, Step 3.2
+# Shared infrastructure:
+#   postgres     Postgres 16 + pgvector (sessions, checkpoints, memories, credentials)
+#   mcp-papers   MCP server: real arXiv search
+#   mcp-notify   MCP server: mock notification provider that requires an API key
 #
-# The control plane runs on your host machine (python), and agent containers are started
-# dynamically by the control plane through the Docker SDK. Both need to reach Postgres:
-#   - control plane (host)      -> localhost:5432
-#   - agent containers (Docker) -> postgres:5432 over the "agentic-net" network
+# Networks:
+#   agentic-net  postgres + agent containers (agents are attached by the control plane)
+#   tools-net    MCP servers ONLY. Agents are NOT on this network, so they cannot reach
+#                the MCP servers by name. The control plane (on the host) reaches them
+#                through the published localhost ports, and the servers additionally
+#                require X-Gateway-Secret, which only the control plane knows.
 #
-# Init scripts in /docker-entrypoint-initdb.d run in alphabetical order, ONLY when the
-# data volume is empty (first start):
-#   01_init.sql    -> Phase 1 control-plane tables
-#   02_memory.sql  -> Phase 2 long-term memory (pgvector)
+# Secrets come from .env in this folder (Docker Compose reads it automatically):
+#   MCP_GATEWAY_SECRET   shared between the control plane's gateway and the MCP servers
+#   NOTIFY_ACCOUNTS      the mock provider's issued API keys ("key:account,key:account")
 #
 # Usage:
-#   docker compose up -d
-#   docker compose ps          (wait until postgres shows "healthy")
+#   docker compose up -d --build
+#   docker compose ps          (wait until all services show "healthy")
 #   docker compose down        (stop; data stays in the volume)
 #   docker compose down -v     (stop AND wipe all data)
 
@@ -42,6 +45,52 @@ services:
     networks:
       - agentic-net
 
+  mcp-papers:
+    build:
+      context: ./mcp_servers
+      dockerfile: papers/Dockerfile
+    image: agentic-cloud/mcp-papers:phase3
+    container_name: mcp-papers
+    restart: unless-stopped
+    environment:
+      MCP_GATEWAY_SECRET: ${MCP_GATEWAY_SECRET:?set MCP_GATEWAY_SECRET in .env}
+      ARXIV_MIN_INTERVAL_S: "3.0"
+      CACHE_TTL_S: "3600"
+      ARXIV_TIMEOUT_S: "20"
+      ARXIV_RETRIES: "2"          # retries on 429/503: wait Retry-After or 5 s, 10 s
+      ARXIV_COOLDOWN_S: "60"      # then stop calling arXiv for 60 s (fail fast)
+      PAPERS_FALLBACK: "mock"     # mock = clearly-labelled placeholder papers while arXiv refuses
+                                  # none = return the error to the caller instead
+    ports:
+      - "127.0.0.1:9101:9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - tools-net
+
+  mcp-notify:
+    build:
+      context: ./mcp_servers
+      dockerfile: notify/Dockerfile
+    image: agentic-cloud/mcp-notify:phase3
+    container_name: mcp-notify
+    restart: unless-stopped
+    environment:
+      MCP_GATEWAY_SECRET: ${MCP_GATEWAY_SECRET:?set MCP_GATEWAY_SECRET in .env}
+      NOTIFY_ACCOUNTS: ${NOTIFY_ACCOUNTS:-}
+    ports:
+      - "127.0.0.1:9102:9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - tools-net
+
 volumes:
   pgdata:
 
@@ -49,4 +98,7 @@ networks:
   agentic-net:
     # Fixed name so the control plane can attach agent containers to it
     name: agentic-net
+    driver: bridge
+  tools-net:
+    name: tools-net
     driver: bridge

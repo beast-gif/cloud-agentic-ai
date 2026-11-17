@@ -30,6 +30,20 @@ L2 workspaces (Phase 2, Step 2.3):
   GET  /admin/workspaces             all workspace volumes
   POST /admin/workspaces/gc          delete finished/orphan volumes now (?older_than_s=0 ignores retention)
 
+Credential vault (Phase 3, Step 3.1) - admin only; secrets are NEVER returned:
+  PUT    /admin/vault/{user_id}/{provider}         store/replace  {"secret", "metadata"?}
+  GET    /admin/vault/{user_id}                    list (fingerprints + metadata, no secrets)
+  POST   /admin/vault/{user_id}/{provider}/verify  prove it decrypts (returns fingerprint only)
+  DELETE /admin/vault/{user_id}/{provider}         remove
+  GET    /admin/vault/audit                        who stored / decrypted what, and when
+  POST   /admin/vault/rotate                       re-encrypt everything with the newest master key
+
+MCP gateway (Phase 3, Step 3.3) - for AGENTS, needs  Authorization: Bearer <MEMORY_TOKEN>
+  POST /mcp                          JSON-RPC: initialize, ping, tools/list, tools/call
+  GET  /sessions/{id}/tool-calls     audit log of one session's tool calls
+  GET  /admin/gateway                servers, policies, catalog, token buckets, stats
+  POST /admin/gateway/refresh        re-read tools/list from the MCP servers
+
 Other:
   POST /admin/reconcile              run reconciliation again
   GET  /healthz                      control plane status
@@ -52,13 +66,16 @@ from pydantic import BaseModel, Field
 from control_plane.auth import SessionAuth
 from control_plane.docker_driver import DockerDriver
 from control_plane.embeddings import Embedder, make_embedder, provider_settings
+from control_plane.gateway import Gateway
 from control_plane.idle_reaper import IdleReaper
 from control_plane.lifecycle import SessionError, SessionManager, SessionNotFound
 from control_plane.memory_store import KINDS, MemoryStore
 from control_plane.migrations import apply_migrations
 from control_plane.session_store import SessionStore
-from control_plane.settings import agent_env, load_config
+from control_plane.settings import agent_env, load_config, load_dotenv
+from control_plane.vault import Vault, VaultError
 
+DOTENV_LOADED = load_dotenv()  # secrets (.env) -> this process's environment only
 CFG = load_config()
 
 logging.basicConfig(
@@ -78,6 +95,8 @@ class Services:
     embedder: Embedder
     memory: MemoryStore
     mem_settings: dict
+    vault: Vault
+    gateway: Gateway
     startup_reconcile: dict
     migrations_applied: list
 
@@ -99,6 +118,23 @@ async def lifespan(_: FastAPI):
     log.info("embeddings: %s (min_score=%s, dedup=%s)", S.embedder.name,
              S.mem_settings["min_score"], S.mem_settings["dedup_threshold"])
 
+    # Phase 3: credential vault (master key from the environment / .env, never from the DB)
+    S.vault = Vault.from_env(S.store.pool, (CFG.get("vault") or {}).get("master_key_env", "VAULT_MASTER_KEY"))
+    if S.vault.enabled:
+        log.info("vault enabled: %d master key(s), primary key_id=%s (.env vars loaded: %s)",
+                 len(S.vault.keys), S.vault.primary_key_id, DOTENV_LOADED or "none")
+    else:
+        log.warning("vault DISABLED: VAULT_MASTER_KEY not set (copy .env.example to .env)")
+
+    # Phase 3: MCP gateway (needs MCP_GATEWAY_SECRET from .env to talk to the MCP servers)
+    S.gateway = Gateway(CFG, S.store.pool, S.vault)
+    if S.gateway.enabled:
+        tools = S.gateway.catalog(force=True)
+        log.info("gateway enabled: %d servers, %d tools: %s", len(S.gateway.backends),
+                 len(tools), ", ".join(t.full_name for t in tools) or "none (are the MCP servers up?)")
+    else:
+        log.warning("gateway DISABLED: MCP_GATEWAY_SECRET not set in .env")
+
     S.driver = DockerDriver.from_config(CFG, base_env=agent_env(CFG))
     S.driver.ensure_ready()
     S.manager = SessionManager(CFG, S.store, S.driver, auth=S.auth)
@@ -117,6 +153,7 @@ async def lifespan(_: FastAPI):
     log.info("control plane ready")
     yield
     S.reaper.stop()
+    S.gateway.close()
     S.manager.close()
     S.driver.close()
     S.store.close()
@@ -128,6 +165,11 @@ app = FastAPI(title="Agentic Cloud - control plane", lifespan=lifespan)
 
 @app.exception_handler(SessionError)
 async def _session_error(_: Request, exc: SessionError):
+    return JSONResponse({"error": str(exc), "type": type(exc).__name__}, status_code=exc.status_code)
+
+
+@app.exception_handler(VaultError)
+async def _vault_error(_: Request, exc: VaultError):
     return JSONResponse({"error": str(exc), "type": type(exc).__name__}, status_code=exc.status_code)
 
 
@@ -163,6 +205,12 @@ class AdminMemorySearchRequest(MemorySearchRequest):
 
 class AdminMemoryWriteRequest(MemoryWriteRequest):
     user_id: str = Field(..., examples=["amrith"])
+
+
+class VaultPutRequest(BaseModel):
+    secret: str = Field(..., min_length=1, examples=["ntf_live_7Hk2..."])
+    metadata: dict[str, Any] = Field(default_factory=dict,
+                                     description="NON-secret settings, e.g. the owner's own chat id")
 
 
 # ============================================================ sessions (Phase 1)
@@ -340,6 +388,87 @@ def memory_stats():
     return {"embedder": S.embedder.stats(), "settings": S.mem_settings, "counts": S.memory.stats()}
 
 
+# ============================================================ credential vault (Phase 3, admin only)
+# No endpoint ever returns a secret or a ciphertext. Only the gateway (Step 3.3)
+# decrypts, inside the control plane, at the moment of a tool call.
+
+@app.put("/admin/vault/{user_id}/{provider}")
+def vault_put(user_id: str, provider: str, req: VaultPutRequest):
+    return S.vault.put(user_id, provider, req.secret, metadata=req.metadata)
+
+
+@app.get("/admin/vault/audit")
+def vault_audit(user_id: Optional[str] = None, limit: int = 100):
+    return S.vault.audit_log(user_id=user_id, limit=limit)
+
+
+@app.get("/admin/vault/{user_id}")
+def vault_list(user_id: str):
+    return S.vault.list(user_id)
+
+
+@app.post("/admin/vault/{user_id}/{provider}/verify")
+def vault_verify(user_id: str, provider: str):
+    return S.vault.verify(user_id, provider)
+
+
+@app.delete("/admin/vault/{user_id}/{provider}")
+def vault_delete(user_id: str, provider: str):
+    return {"deleted": S.vault.delete(user_id, provider)}
+
+
+@app.post("/admin/vault/rotate")
+def vault_rotate():
+    return S.vault.rotate()
+
+
+# ============================================================ MCP gateway (Phase 3, for agents)
+
+@app.post("/mcp")
+async def mcp_gateway(request: Request, authorization: Optional[str] = Header(None)):
+    """The single MCP endpoint for agents. The session token decides WHO is calling;
+    the gateway's policy decides WHAT they may do."""
+    from starlette.concurrency import run_in_threadpool
+
+    if not S.gateway.enabled:
+        return JSONResponse({"jsonrpc": "2.0", "id": None,
+                             "error": {"code": -32003, "message": "gateway disabled (MCP_GATEWAY_SECRET not set)"}},
+                            status_code=503)
+    try:
+        msg = await request.json()
+    except ValueError:
+        return JSONResponse({"jsonrpc": "2.0", "id": None,
+                             "error": {"code": -32700, "message": "parse error"}}, status_code=400)
+
+    token = authorization[7:].strip() if authorization and authorization.lower().startswith("bearer ") else None
+    session = await run_in_threadpool(S.auth.resolve, token)
+    if session is None:
+        msg_id = msg.get("id") if isinstance(msg, dict) else None
+        return JSONResponse({"jsonrpc": "2.0", "id": msg_id,
+                             "error": {"code": -32001, "message": "invalid, expired or missing session token"}},
+                            status_code=401)
+
+    reply = await run_in_threadpool(S.gateway.handle, msg, session)
+    if reply is None:
+        return JSONResponse(None, status_code=202)
+    return JSONResponse(reply)
+
+
+@app.get("/sessions/{session_id}/tool-calls")
+def session_tool_calls(session_id: str, limit: int = 200):
+    return S.gateway.tool_calls(session_id=session_id, limit=limit)
+
+
+@app.get("/admin/gateway")
+def gateway_status():
+    return S.gateway.status()
+
+
+@app.post("/admin/gateway/refresh")
+def gateway_refresh():
+    return {"tools": [t.full_name for t in S.gateway.catalog(force=True)]}
+
+
 # ============================================================ metrics / admin
 
 def _avg(rows: list[dict], key: str) -> Optional[float]:
@@ -390,6 +519,8 @@ def healthz():
         "startup_reconcile": S.startup_reconcile,
         "migrations_applied_at_startup": S.migrations_applied,
         "embedder": S.embedder.stats(),
+        "vault": S.vault.status(),
+        "gateway": {"enabled": S.gateway.enabled, "stats": S.gateway.stats},
     }
 
 

@@ -1,8 +1,12 @@
 """
-Agentic Cloud - Phase 1, Step 1.3 (updated in Phase 2, Step 2.2: MEMORY_API_URL)
+Agentic Cloud - Phase 1, Step 1.3
+  updated in Phase 2, Step 2.2: MEMORY_API_URL
+  updated in Phase 3, Step 3.1: load_dotenv() for secrets such as VAULT_MASTER_KEY
 Loads config.yaml and builds the environment variables passed to agent containers.
 
 Config path: $AGENTIC_CONFIG if set, otherwise <repo root>/config.yaml
+Secrets   : <repo root>/.env (git-ignored), loaded into the CONTROL PLANE's environment only.
+            They are never copied into agent containers (agent_env() below does not read them).
 """
 
 from __future__ import annotations
@@ -14,6 +18,30 @@ from typing import Any
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_dotenv(path: str | os.PathLike | None = None) -> list[str]:
+    """Minimal .env loader: KEY=VALUE lines, '#' comments, optional quotes.
+
+    Existing environment variables win (os.environ.setdefault), so a value set in the
+    shell overrides the file. Returns the names that were loaded (never the values).
+    """
+    env_path = Path(path or REPO_ROOT / ".env")
+    if not env_path.exists():
+        return []
+    loaded = []
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
 
 
 def load_config(path: str | os.PathLike | None = None) -> dict[str, Any]:
