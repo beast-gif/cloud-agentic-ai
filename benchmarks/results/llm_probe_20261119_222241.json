@@ -1,0 +1,90 @@
+{
+  "pairs": 24,
+  "topics": [
+    "KV cache compression",
+    "speculative decoding",
+    "protein structure prediction"
+  ],
+  "cloud": {
+    "model": "anthropic/claude-haiku-5.5",
+    "score_wall_ms_p50": 1286.1,
+    "parse_failures": 2,
+    "parse_failure_samples": [
+      {
+        "text": "",
+        "finish_reason": "length",
+        "message_keys": [
+          "role"
+        ],
+        "out_tokens": 64
+      },
+      {
+        "text": "",
+        "finish_reason": "length",
+        "message_keys": [
+          "role"
+        ],
+        "out_tokens": 64
+      }
+    ],
+    "mean_score_by_kind": {
+      "same-topic": 9.27,
+      "other-topic": 1.09,
+      "separation": 8.18
+    },
+    "tokens_in": 10928,
+    "tokens_out": 426,
+    "cost_inr_total": 1.2427,
+    "summaries": [
+      {
+        "wall_ms": 1600,
+        "ok": true,
+        "why": "ok",
+        "text": "PolyKV is a system where many AI agents share one compressed key-value cache instead of each keeping its own, cutting memory use dramatically. Keys are compressed with int8 and values with a 3-bit method, reaching about 2.91x compression while keeping quality nearly unchanged (e.g., a 97.7% memory r"
+      },
+      {
+        "wall_ms": 1518,
+        "ok": true,
+        "why": "ok",
+        "text": "This paper proposes a learned, global KV cache eviction method that keeps only the most useful tokens under a fixed memory budget, reducing memory use for long-context models. The authors show, both theoretically and empirically, that selectively dropping irrelevant tokens can reduce attention dilut"
+      }
+    ]
+  },
+  "local": {
+    "llama3.2:3b": {
+      "score_wall_ms_p50": 3793.5,
+      "prompt_tok_per_s_p50": 595.9000000000001,
+      "output_tok_per_s_p50": 12.350000000000001,
+      "parse_failures": 0,
+      "mae_vs_cloud": 3.3,
+      "top5_overlap_vs_cloud": 0.867,
+      "mean_score_by_kind": {
+        "same-topic": 7.5,
+        "other-topic": 6.17,
+        "separation": 1.33
+      },
+      "bias_vs_cloud": 1.61,
+      "p_fail_disagree_rate": 0.0,
+      "mae_when_agree": 3.3,
+      "mae_when_disagree": null,
+      "big_errors": 9,
+      "big_errors_caught_by_disagreement": 0,
+      "summaries": [
+        {
+          "wall_ms": 28855,
+          "ok": true,
+          "why": "ok",
+          "out_tok_per_s": 6.1,
+          "text": "Here's a 2-sentence summary of the research paper for a student:\n\nResearchers have developed a new system called PolyKV, which allows multiple AI models to share a single, compressed cache pool, reducing memory usage by up to 97.7%. By compressing keys and values in different ways, PolyKV achieves a"
+        },
+        {
+          "wall_ms": 21483,
+          "ok": true,
+          "why": "ok",
+          "out_tok_per_s": 7.6,
+          "text": "Here's a 2-sentence summary of the research paper for a student:\n\nThis paper proposes a new method for improving long-context performance in language and vision-language models by selectively evicting irrelevant tokens from the key-value (KV) cache. The method, called global retention-based KV evict"
+        }
+      ]
+    }
+  }
+}

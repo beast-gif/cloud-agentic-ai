@@ -44,7 +44,7 @@ control_plane:
 # Session lifecycle (freeze / wake)
 # ---------------------------------------------------------------------------
 lifecycle:
-  idle_timeout_s: 300                # WAITING longer than this -> freeze (stop container)
+  idle_timeout_s: 30                # WAITING longer than this -> freeze (stop container)
   reaper_interval_s: 5              # how often the idle reaper checks
   health_timeout_s: 60              # max time to wait for a new container's /health
   health_poll_ms: 100               # /health polling interval (sets wake-time resolution)
@@ -145,6 +145,50 @@ mcp:
       rate_limits:
         papers: {capacity: 3, refill_per_s: 0.33, scope: global}
         notify: {capacity: 3, refill_per_s: 0.05, scope: session}
+
+# ---------------------------------------------------------------------------
+# Phase 4: model router (local Ollama vs cloud LLM)
+#   The router runs in the CONTROL PLANE (host), so Ollama is reached at localhost.
+#   The cloud key is NOT here and NOT in .env: it is stored in the vault as
+#     user_id = platform, provider = velona      (PUT /admin/vault/platform/velona)
+#
+#   Velona bills in INR:  cost_inr = usd_price x usd_inr x 1.005 (forex buffer) x 1.07 (platform fee)
+#   Fill in the cloud model's USD prices per million tokens from Velona's model page
+#   and today's USD/INR rate to get rupee costs; leave null to report tokens only.
+# ---------------------------------------------------------------------------
+router:
+  mode: cascade
+  budget_inr_per_session: 5.0
+  local:
+    base_url: http://localhost:11434
+    embed_model: nomic-embed-text
+    chat_model: qwen2.5:1.5b                # summaries fallback / local mode (not used for scoring)
+    keep_alive: 30m                         # keep models in RAM (a cold load cost ~7 s)
+    timeout_s: 180
+    models: [qwen2.5:1.5b, llama3.2:3b]     # only used by benchmarks/llm_probe.py
+  rank:
+    calibration: {cos_low: 0.52, score_low: 1.09, cos_high: 0.76, score_high: 8.92}
+    uncertain_band: [0.60, 0.68]
+    cut_gap: 1.5
+    max_cloud_calls: 6
+    cloud_parallel: 4
+    embed_chars: 1600
+    cache_items: 5000
+  cloud:
+    provider: velona
+    url: https://velona.in/v1/chat/completions
+    model: anthropic/claude-haiku-5.5
+    vault_user: platform
+    vault_provider: velona
+    timeout_s: 60
+    score_max_tokens: 64
+    summary_max_tokens: 300
+    generic_max_tokens: 400
+    retry_multiplier: 4
+    price_usd_per_mtok: {input: null, output: null}     # <- put your values back
+    usd_inr: null                                       # <- put your value back
+    forex_buffer: 1.005
+    platform_fee: 1.07
 
 # ---------------------------------------------------------------------------
 # Logging

@@ -28,6 +28,8 @@ Environment variables (set by the control plane in Step 1.3):
   LOG_LEVEL           default INFO
   MEMORY_API_URL      Phase 2: control plane Memory API (L3)
   MEMORY_TOKEN        Phase 2: this container's session token (rotated on every wake)
+                      Phase 3: the same token authenticates the agent to the MCP gateway
+  MCP_GATEWAY_URL     Phase 3: the control plane's MCP gateway, e.g. http://host.docker.internal:8000/mcp
   WORKSPACE_DIR       Phase 2: L2 workspace mount, default /workspace
 """
 
@@ -82,6 +84,7 @@ class Runtime:
         self.pool = None
         self.llm = None
         self.memory = None
+        self.mcp = None
         self.Command = None
         self.timings: dict[str, Any] = {}
 
@@ -104,6 +107,7 @@ def _init_agent() -> None:
 
         from graph import build_graph
         from llm import LLM
+        from mcp_client import MCPClient
         from memory_client import MemoryClient
         t1 = time.perf_counter()
 
@@ -134,8 +138,12 @@ def _init_agent() -> None:
             base_url=os.environ.get("MEMORY_API_URL", ""),
             token=os.environ.get("MEMORY_TOKEN", ""),
         )
+        mcp = MCPClient(
+            url=os.environ.get("MCP_GATEWAY_URL", ""),
+            token=os.environ.get("MEMORY_TOKEN", ""),
+        )
         graph = build_graph(
-            llm, checkpointer, memory=memory,
+            llm, checkpointer, memory=memory, mcp=mcp,
             workspace_dir=os.environ.get("WORKSPACE_DIR", "/workspace"),
         )
         t3 = time.perf_counter()
@@ -146,6 +154,7 @@ def _init_agent() -> None:
 
         RT.pool, RT.llm, RT.graph, RT.Command = pool, llm, graph, Command
         RT.memory = memory
+        RT.mcp = mcp
         RT.timings = {
             # docker run requested -> python process started (host and VM clocks may differ slightly)
             "container_start_ms": container_start_ms,
@@ -176,6 +185,8 @@ async def lifespan(_: FastAPI):
         RT.llm.close()
     if RT.memory is not None:
         RT.memory.close()
+    if RT.mcp is not None:
+        RT.mcp.close()
     if RT.pool is not None:
         RT.pool.close()
     log.info("agent shut down")
@@ -213,6 +224,7 @@ def _result(thread_id: str, run_ms: float, checkpoint_load_ms: Optional[float] =
         "checkpoint_load_ms": checkpoint_load_ms,
         "llm": RT.llm.stats(),
         "memory": RT.memory.stats(),
+        "mcp": dict(RT.mcp.stats),
     }
 
     if snap.next:  # graph paused -> waiting for a human
@@ -236,6 +248,9 @@ def _result(thread_id: str, run_ms: float, checkpoint_load_ms: Optional[float] =
             "skipped_already_read": values.get("skipped_already_read", []),
             "workspace_files": values.get("workspace_files", []),
             "memories_written": values.get("memories_written", []),
+            "search_source": values.get("search_source"),
+            "search_note": values.get("search_note"),
+            "notification": values.get("notification"),
         },
     }
 

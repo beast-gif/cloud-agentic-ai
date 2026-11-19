@@ -1,10 +1,10 @@
 """
-Agentic Cloud - Phase 2, Step 2.4
-Research-assistant agent as a LangGraph graph - now using all three memory layers.
+Agentic Cloud - Phase 2, Step 2.4 (+ Phase 3, Step 3.4: real tools via the MCP gateway)
+Research-assistant agent as a LangGraph graph - using all three memory layers and MCP tools.
 
 Flow:
   START -> recall_memory -> search_papers -> rank_papers -> await_selection --(valid)-->
-           summarize_papers -> write_report -> remember -> END
+           summarize_papers -> write_report -> remember -> notify_user -> END
                                  ^      |
                                  +------+ (invalid selection: ask again)
 
@@ -12,6 +12,11 @@ Flow:
   L2 (workspace)   : write_report saves report.md + summaries.json to /workspace
   L3 (long-term)   : recall_memory reads past papers of THIS user (Memory API);
                      rank_papers skips papers already read; remember saves new ones
+  MCP (Phase 3)    : search_papers -> "papers.search" (real arXiv) through the gateway;
+                     notify_user   -> "notify.send" - the agent passes only the message:
+                     the gateway fills in the recipient and attaches the API key.
+                     If the gateway is unavailable, search falls back to the local mock
+                     and the report says so; a failed notification never fails the run.
 
 await_selection calls interrupt(): the graph PAUSES there and its state is saved as a
 checkpoint in Postgres (keyed by thread_id). The container can then be stopped (FROZEN).
@@ -34,20 +39,24 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from llm import LLM
+from mcp_client import MCPClient, MCPError, ToolFailed
 from memory_client import MemoryClient
-from tools import search_papers
+from tools import search_papers as mock_search_papers
 
 log = logging.getLogger("agent.graph")
 
 SEARCH_K = 8          # papers fetched by the search tool
 SHORTLIST_SIZE = 5    # papers shown to the user
 RECALL_K = 10         # past memories fetched before searching
+SCORE_ABSTRACT_CHARS = 800   # real abstracts are long: score on the first part only
 
 
 class ResearchState(TypedDict, total=False):
     topic: str
     recalled: list[dict]            # L3: related past memories of this user
     candidates: list[dict]          # raw search results
+    search_source: str              # arxiv | fallback (papers server placeholder) | mock (gateway unavailable)
+    search_note: Optional[str]      # why it was not arxiv, if it was not
     skipped_already_read: list[dict]  # candidates removed because the user read them before
     shortlist: list[dict]           # top papers with "rank" (1-based) and "score"
     selection_error: Optional[str]  # set when the user's selection was invalid
@@ -56,6 +65,7 @@ class ResearchState(TypedDict, total=False):
     report: str
     workspace_files: list[str]      # L2: files written to /workspace
     memories_written: list[dict]    # L3: result of each memory write (inserted / deduplicated)
+    notification: dict              # MCP: result of notify.send (or the error)
 
 
 def _parse_selection(answer: Any, max_rank: int) -> tuple[list[int], Optional[str]]:
@@ -78,7 +88,20 @@ def _parse_selection(answer: Any, max_rank: int) -> tuple[list[int], Optional[st
     return sorted(ranks), None
 
 
-def build_graph(llm: LLM, checkpointer, memory: MemoryClient, workspace_dir: str = "/workspace"):
+def _normalize_paper(p: dict) -> dict:
+    """MCP papers.search result -> the fields the rest of the graph uses."""
+    return {
+        "id": str(p.get("id", "")),
+        "title": p.get("title") or "(untitled)",
+        "abstract": p.get("abstract") or "",
+        "year": p.get("year"),
+        "venue": p.get("venue") or "arXiv",
+        "url": p.get("url"),
+    }
+
+
+def build_graph(llm: LLM, checkpointer, memory: MemoryClient, mcp: MCPClient,
+                workspace_dir: str = "/workspace"):
     """Build and compile the research-assistant graph."""
 
     # -------------------------------------------------------------- L3: recall
@@ -100,7 +123,22 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, workspace_dir: str
     # -------------------------------------------------------------- search + rank
 
     def search_node(state: ResearchState) -> dict:
-        return {"candidates": search_papers(state["topic"], k=SEARCH_K)}
+        """Real search through the MCP gateway; local mock only if the gateway is unusable."""
+        topic = state["topic"]
+        try:
+            out = mcp.call_with_retry("papers.search", {"query": topic, "max_results": SEARCH_K})
+            papers = [_normalize_paper(p) for p in (out or {}).get("papers", [])]
+            source = (out or {}).get("source", "arxiv")
+            note = (out or {}).get("note")
+            if papers:
+                log.info("papers.search via gateway: %d papers (source=%s)", len(papers), source)
+                return {"candidates": papers, "search_source": source, "search_note": note}
+            note = "papers.search returned no results"
+        except (MCPError, ToolFailed) as exc:
+            note = f"gateway search failed: {exc}"
+        log.warning("%s -> using local mock search", note)
+        return {"candidates": mock_search_papers(topic, k=SEARCH_K),
+                "search_source": "mock", "search_note": note}
 
     def rank_node(state: ResearchState) -> dict:
         topic = state["topic"]
@@ -112,7 +150,7 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, workspace_dir: str
                    for p in state["candidates"] if p["id"] in read_ids]
 
         scored = [
-            {**p, "score": llm.score_relevance(topic, p["title"], p["abstract"])}
+            {**p, "score": llm.score_relevance(topic, p["title"], p["abstract"][:SCORE_ABSTRACT_CHARS])}
             for p in fresh
         ]
         scored.sort(key=lambda p: p["score"], reverse=True)
@@ -136,6 +174,9 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, workspace_dir: str
                 }
                 for p in shortlist
             ],
+            # where the papers came from: arxiv | fallback | mock
+            "search_source": state.get("search_source"),
+            "search_note": state.get("search_note"),
             # L3 context shown to the user
             "already_read_skipped": state.get("skipped_already_read", []),
             "related_past_reading": state.get("recalled", [])[:3],
@@ -167,7 +208,8 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, workspace_dir: str
                     "title": p["title"],
                     "venue": p["venue"],
                     "year": p["year"],
-                    "summary": llm.summarize(p["title"], p["abstract"]),
+                    "url": p.get("url"),
+                    "summary": llm.summarize(p["title"], p["abstract"][:SCORE_ABSTRACT_CHARS * 2]),
                 }
             )
         return {"summaries": summaries}
@@ -176,8 +218,15 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, workspace_dir: str
 
     def report_node(state: ResearchState) -> dict:
         lines = [f"# Research brief: {state['topic']}", ""]
+        source = state.get("search_source", "mock")
+        if source != "arxiv":
+            lines.append(f"_Note: papers came from the **{source}** source "
+                         f"({state.get('search_note') or 'arXiv unavailable'}), not live arXiv._")
+            lines.append("")
         for s in state["summaries"]:
             lines.append(f"## {s['rank']}. {s['title']} ({s['venue']} {s['year']})")
+            if s.get("url"):
+                lines.append(s["url"])
             lines.append(s["summary"])
             lines.append("")
         skipped = state.get("skipped_already_read", [])
@@ -210,7 +259,8 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, workspace_dir: str
                 kind="paper_read",
                 content=f"Read '{s['title']}' ({s['venue']} {s['year']}): {s['summary']}",
                 metadata={"paper_id": s["id"], "title": s["title"], "venue": s["venue"],
-                          "year": s["year"], "topic": state["topic"]},
+                          "year": s["year"], "url": s.get("url"), "topic": state["topic"],
+                          "source": state.get("search_source")},
             )
             results.append({"title": s["title"],
                             "action": (res or {}).get("action", "failed"),
@@ -227,6 +277,22 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, workspace_dir: str
                         "memory_id": (res or {}).get("id")})
         return {"memories_written": results}
 
+    # -------------------------------------------------------------- MCP: notify
+
+    def notify_node(state: ResearchState) -> dict:
+        """Tell the user the brief is ready. The agent sends ONLY the message:
+        the gateway fills in the recipient (owner_only rule) and the vault API key.
+        A failed notification is recorded but never fails the run."""
+        n = len(state.get("summaries", []))
+        message = (f"Your research brief on '{state['topic']}' is ready: "
+                   f"{n} paper(s) summarized (source: {state.get('search_source', 'mock')}).")
+        try:
+            out = mcp.call_with_retry("notify.send", {"message": message}, max_wait_s=25.0)
+            return {"notification": {"sent": True, **(out or {})}}
+        except (MCPError, ToolFailed) as exc:
+            log.warning("notification not sent: %s", exc)
+            return {"notification": {"sent": False, "error": str(exc)}}
+
     # -------------------------------------------------------------- wiring
     # Node names must differ from state keys (LangGraph rule).
 
@@ -238,6 +304,7 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, workspace_dir: str
     g.add_node("summarize_papers", summarize_node)
     g.add_node("write_report", report_node)
     g.add_node("remember", remember_node)
+    g.add_node("notify_user", notify_node)
 
     g.add_edge(START, "recall_memory")
     g.add_edge("recall_memory", "search_papers")
@@ -250,6 +317,7 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, workspace_dir: str
     )
     g.add_edge("summarize_papers", "write_report")
     g.add_edge("write_report", "remember")
-    g.add_edge("remember", END)
+    g.add_edge("remember", "notify_user")
+    g.add_edge("notify_user", END)
 
     return g.compile(checkpointer=checkpointer)

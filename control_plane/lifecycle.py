@@ -417,6 +417,6 @@ class SessionManager:
             "session": {k: v for k, v in (session or {}).items() if k != "token_hash"},
             "agent": {k: res.get(k) for k in
                       ("status", "waiting_for", "data", "error", "run_ms", "checkpoint_load_ms",
-                       "llm", "memory")},
+                       "llm", "memory", "mcp")},
             "timings_ms": {**(timings or {}), "total_ms": total_ms},
         }

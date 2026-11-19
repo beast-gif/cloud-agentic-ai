@@ -77,6 +77,9 @@ def agent_env(cfg: dict[str, Any]) -> dict[str, str]:
         # The per-session MEMORY_TOKEN is added by the lifecycle on every container start.
         "MEMORY_API_URL": str(cfg["control_plane"].get("agent_facing_url",
                                                        "http://host.docker.internal:8000")),
+        # Phase 3: the ONLY tool endpoint agents know. No tool-server addresses, no API keys.
+        "MCP_GATEWAY_URL": str(cfg["control_plane"].get("agent_facing_url",
+                                                        "http://host.docker.internal:8000")).rstrip("/") + "/mcp",
     }
     if "mock_latency_ms" in llm:
         env["MOCK_LATENCY_MS"] = str(llm["mock_latency_ms"])

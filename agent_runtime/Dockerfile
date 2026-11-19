@@ -18,7 +18,7 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # Agent code
-COPY llm.py tools.py memory_client.py graph.py server.py ./
+COPY llm.py tools.py memory_client.py mcp_client.py graph.py server.py ./
 
 # Run as a non-root user
 RUN useradd --create-home --uid 10001 agent

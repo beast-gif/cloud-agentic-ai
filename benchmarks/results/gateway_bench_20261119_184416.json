@@ -1,0 +1,77 @@
+{
+  "session_id": "s-7b81ae1b",
+  "n": 50,
+  "problems": 0,
+  "results": {
+    "papers.search": {
+      "direct_client_ms": {
+        "n": 50,
+        "mean": 6.94,
+        "p50": 6.53,
+        "p95": 10.3,
+        "min": 5.22,
+        "max": 13.23
+      },
+      "gateway_client_ms": {
+        "n": 50,
+        "mean": 21.94,
+        "p50": 20.79,
+        "p95": 29.94,
+        "min": 18.09,
+        "max": 35.13
+      },
+      "added_p50_ms": 14.26,
+      "gateway_internal_ms": {
+        "n": 50,
+        "mean": 0.08,
+        "p50": 0.1,
+        "p95": 0.2,
+        "min": 0.0,
+        "max": 0.2
+      },
+      "backend_ms": {
+        "n": 50,
+        "mean": 7.73,
+        "p50": 7.55,
+        "p95": 9.8,
+        "min": 5.1,
+        "max": 18.5
+      }
+    },
+    "notify.send": {
+      "direct_client_ms": {
+        "n": 50,
+        "mean": 7.45,
+        "p50": 7.12,
+        "p95": 11.0,
+        "min": 4.71,
+        "max": 14.2
+      },
+      "gateway_client_ms": {
+        "n": 50,
+        "mean": 37.77,
+        "p50": 35.05,
+        "p95": 45.3,
+        "min": 26.68,
+        "max": 162.94
+      },
+      "added_p50_ms": 27.93,
+      "gateway_internal_ms": {
+        "n": 50,
+        "mean": 14.17,
+        "p50": 13.55,
+        "p95": 18.7,
+        "min": 9.7,
+        "max": 23.9
+      },
+      "backend_ms": {
+        "n": 50,
+        "mean": 7.94,
+        "p50": 6.35,
+        "p95": 9.0,
+        "min": 4.9,
+        "max": 76.9
+      }
+    }
+  }
+}

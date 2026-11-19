@@ -1,0 +1,61 @@
+{
+  "pairs": 24,
+  "topics": [
+    "KV cache compression",
+    "speculative decoding",
+    "protein structure prediction"
+  ],
+  "cloud": {
+    "model": "anthropic/claude-haiku-5.5",
+    "score_wall_ms_p50": 1349.8,
+    "parse_failures": 11,
+    "tokens_in": 3312,
+    "tokens_out": 437,
+    "cost_inr_total": 0.5231,
+    "summaries": [
+      {
+        "wall_ms": 2043,
+        "ok": false,
+        "why": "refusal",
+        "text": "The abstract you provided is only a placeholder, so I can't t"
+      },
+      {
+        "wall_ms": 1853,
+        "ok": true,
+        "why": "ok",
+        "text": "This paper proposes a method for compressing the KV cache (the memory that stores past attention values during text generation) using speculative decoding. The provided abstract is only a placeholder, so this summary is based on the title and that short description, not the full paper."
+      }
+    ]
+  },
+  "local": {
+    "qwen2.5:1.5b": {
+      "score_wall_ms_p50": 1042.9,
+      "prompt_tok_per_s_p50": 477.65,
+      "output_tok_per_s_p50": 22.5,
+      "parse_failures": 0,
+      "mae_vs_cloud": 3.46,
+      "top5_overlap_vs_cloud": 1.0,
+      "p_fail_disagree_rate": 0.042,
+      "mae_when_agree": 3.33,
+      "mae_when_disagree": 5.0,
+      "big_errors": 6,
+      "big_errors_caught_by_disagreement": 1,
+      "summaries": [
+        {
+          "wall_ms": 3327,
+          "ok": true,
+          "why": "ok",
+          "out_tok_per_s": 10.7,
+          "text": "This research proposes an adaptive KV cache compression method using token eviction, aiming to improve data storage efficiency."
+        },
+        {
+          "wall_ms": 3698,
+          "ok": true,
+          "why": "ok",
+          "out_tok_per_s": 9.4,
+          "text": "This research proposes a KV cache compression technique that uses speculative decoding to efficiently reduce the size of the cache."
+        }
+      ]
+    }
+  }
+}

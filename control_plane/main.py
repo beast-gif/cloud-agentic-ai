@@ -44,6 +44,17 @@ MCP gateway (Phase 3, Step 3.3) - for AGENTS, needs  Authorization: Bearer <MEMO
   GET  /admin/gateway                servers, policies, catalog, token buckets, stats
   POST /admin/gateway/refresh        re-read tools/list from the MCP servers
 
+Model router (Phase 4, Step 4.2) - for AGENTS, needs  Authorization: Bearer <MEMORY_TOKEN>
+  POST /llm/rank                     {"topic", "papers": [{"id","title","abstract"}], "k"?, "mode"?}
+  POST /llm/complete                 {"task": "summarize", "input": {"title","abstract"}, "mode"?}
+                                     mode = local | cloud | cascade (default: router.mode in config.yaml)
+  GET  /sessions/{id}/llm-calls      audit log of one session's model calls (+ totals)
+Model router admin (local testing only, no token):
+  POST /admin/llm/rank               same body + "user_id"
+  POST /admin/llm/complete           same body + "user_id"
+  GET  /admin/llm-calls              recent calls (?user_id=)
+  GET  /admin/router                 settings, vector cache, counters, totals per task/route
+
 Other:
   POST /admin/reconcile              run reconciliation again
   GET  /healthz                      control plane status
@@ -71,6 +82,7 @@ from control_plane.idle_reaper import IdleReaper
 from control_plane.lifecycle import SessionError, SessionManager, SessionNotFound
 from control_plane.memory_store import KINDS, MemoryStore
 from control_plane.migrations import apply_migrations
+from control_plane.router import Router, RouterError
 from control_plane.session_store import SessionStore
 from control_plane.settings import agent_env, load_config, load_dotenv
 from control_plane.vault import Vault, VaultError
@@ -97,6 +109,7 @@ class Services:
     mem_settings: dict
     vault: Vault
     gateway: Gateway
+    router: Router
     startup_reconcile: dict
     migrations_applied: list
 
@@ -135,6 +148,13 @@ async def lifespan(_: FastAPI):
     else:
         log.warning("gateway DISABLED: MCP_GATEWAY_SECRET not set in .env")
 
+    # Phase 4: model router (local Ollama vs cloud; the cloud key is read from the vault per call)
+    S.router = Router(CFG, S.store.pool, S.vault)
+    log.info("router: mode=%s, local embed=%s chat=%s, cloud=%s, prices %s, budget/session=%s",
+             S.router.default_mode, S.router.embed_model, S.router.chat_model, S.router.cloud_model,
+             "configured" if S.router.prices_configured else "NOT configured (tokens only)",
+             S.router.budget_inr)
+
     S.driver = DockerDriver.from_config(CFG, base_env=agent_env(CFG))
     S.driver.ensure_ready()
     S.manager = SessionManager(CFG, S.store, S.driver, auth=S.auth)
@@ -154,6 +174,7 @@ async def lifespan(_: FastAPI):
     yield
     S.reaper.stop()
     S.gateway.close()
+    S.router.close()
     S.manager.close()
     S.driver.close()
     S.store.close()
@@ -170,6 +191,11 @@ async def _session_error(_: Request, exc: SessionError):
 
 @app.exception_handler(VaultError)
 async def _vault_error(_: Request, exc: VaultError):
+    return JSONResponse({"error": str(exc), "type": type(exc).__name__}, status_code=exc.status_code)
+
+
+@app.exception_handler(RouterError)
+async def _router_error(_: Request, exc: RouterError):
     return JSONResponse({"error": str(exc), "type": type(exc).__name__}, status_code=exc.status_code)
 
 
@@ -211,6 +237,33 @@ class VaultPutRequest(BaseModel):
     secret: str = Field(..., min_length=1, examples=["ntf_live_7Hk2..."])
     metadata: dict[str, Any] = Field(default_factory=dict,
                                      description="NON-secret settings, e.g. the owner's own chat id")
+
+
+class PaperIn(BaseModel):
+    id: str = Field(..., examples=["2401.12345"])
+    title: str = ""
+    abstract: str = ""
+
+
+class RankRequest(BaseModel):
+    topic: str = Field(..., examples=["KV cache compression"])
+    papers: list[PaperIn] = Field(..., min_length=1, max_length=100)
+    k: int = Field(5, ge=1, le=50, description="shortlist size (the cut the router protects)")
+    mode: Optional[str] = Field(None, examples=["cascade"], description="local | cloud | cascade")
+
+
+class CompleteRequest(BaseModel):
+    task: str = Field("summarize", examples=["summarize"], description="summarize | generic")
+    input: dict[str, Any] = Field(..., examples=[{"title": "PolyKV ...", "abstract": "..."}])
+    mode: Optional[str] = Field(None, examples=["cascade"])
+
+
+class AdminRankRequest(RankRequest):
+    user_id: str = Field("admin", examples=["amrith"])
+
+
+class AdminCompleteRequest(CompleteRequest):
+    user_id: str = Field("admin", examples=["amrith"])
 
 
 # ============================================================ sessions (Phase 1)
@@ -469,6 +522,61 @@ def gateway_refresh():
     return {"tools": [t.full_name for t in S.gateway.catalog(force=True)]}
 
 
+# ============================================================ model router (Phase 4)
+# The agent says WHAT it needs (rank these papers / summarize this one); the router decides
+# WHERE it runs. The session token decides who pays: costs are logged per session.
+
+def _rank(user_id: str, session_id: Optional[str], req: RankRequest) -> dict:
+    return S.router.rank(user_id, session_id, req.topic, [p.model_dump() for p in req.papers],
+                         k=req.k, mode=req.mode)
+
+
+@app.post("/llm/rank")
+def llm_rank(req: RankRequest, authorization: Optional[str] = Header(None)):
+    session = _session_from_token(authorization)
+    out = _rank(session["user_id"], session["session_id"], req)
+    S.store.log_event(session["session_id"], "llm_rank",
+                      {"mode": out["mode"], "papers": len(req.papers), **{k: out["summary"][k] for k in
+                       ("cloud_calls", "escalated", "cost_inr", "latency_ms")}})
+    return {"session_id": session["session_id"], **out}
+
+
+@app.post("/llm/complete")
+def llm_complete(req: CompleteRequest, authorization: Optional[str] = Header(None)):
+    session = _session_from_token(authorization)
+    out = S.router.complete(session["user_id"], session["session_id"], req.task, req.input, mode=req.mode)
+    S.store.log_event(session["session_id"], "llm_complete",
+                      {"task": req.task, "route": out["route"], "fallback": out["fallback"],
+                       "cost_inr": out["cost_inr"], "latency_ms": out["latency_ms"]})
+    return {"session_id": session["session_id"], **out}
+
+
+@app.get("/sessions/{session_id}/llm-calls")
+def session_llm_calls(session_id: str, limit: int = 200):
+    return {"session_id": session_id, "spent_inr": S.router.spent_inr(session_id),
+            "totals": S.router.totals(session_id), "calls": S.router.llm_calls(session_id=session_id, limit=limit)}
+
+
+@app.post("/admin/llm/rank")
+def admin_llm_rank(req: AdminRankRequest):
+    return _rank(req.user_id, None, req)
+
+
+@app.post("/admin/llm/complete")
+def admin_llm_complete(req: AdminCompleteRequest):
+    return S.router.complete(req.user_id, None, req.task, req.input, mode=req.mode)
+
+
+@app.get("/admin/llm-calls")
+def admin_llm_calls(user_id: Optional[str] = None, limit: int = 100):
+    return S.router.llm_calls(user_id=user_id, limit=limit)
+
+
+@app.get("/admin/router")
+def router_status():
+    return S.router.status()
+
+
 # ============================================================ metrics / admin
 
 def _avg(rows: list[dict], key: str) -> Optional[float]:
@@ -521,6 +629,7 @@ def healthz():
         "embedder": S.embedder.stats(),
         "vault": S.vault.status(),
         "gateway": {"enabled": S.gateway.enabled, "stats": S.gateway.stats},
+        "router": {"mode": S.router.default_mode, "stats": S.router.stats},
     }
 
 

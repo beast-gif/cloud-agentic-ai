@@ -1,0 +1,73 @@
+{
+  "pairs": 24,
+  "topics": [
+    "KV cache compression",
+    "speculative decoding",
+    "protein structure prediction"
+  ],
+  "cloud": {
+    "model": "anthropic/claude-haiku-5.5",
+    "score_wall_ms_p50": 1311.9,
+    "parse_failures": 0,
+    "parse_failure_samples": [],
+    "mean_score_by_kind": {
+      "same-topic": 8.67,
+      "other-topic": 0.83,
+      "separation": 7.84
+    },
+    "tokens_in": 10928,
+    "tokens_out": 304,
+    "cost_inr_total": 1.1847,
+    "summaries": [
+      {
+        "wall_ms": 1592,
+        "ok": true,
+        "why": "ok",
+        "text": "PolyKV is a system that lets many AI agents share one compressed key-value cache instead of each keeping its own, which saves a lot of memory. Keys are compressed with 8-bit quantization and values with a 3-bit method, and tests on two models showed about 2.9x compression with only a tiny drop in ou"
+      },
+      {
+        "wall_ms": 1893,
+        "ok": true,
+        "why": "ok",
+        "text": "This paper proposes a learned, global KV cache eviction method that scores each cached token's future usefulness so that tokens from all layers, heads, and modalities compete for a shared memory budget. The authors show this selective eviction cuts KV memory substantially while matching or even beat"
+      }
+    ]
+  },
+  "local": {
+    "qwen2.5:1.5b": {
+      "score_wall_ms_p50": 1936.3,
+      "prompt_tok_per_s_p50": 1156.45,
+      "output_tok_per_s_p50": 23.5,
+      "parse_failures": 0,
+      "mae_vs_cloud": 3.92,
+      "top5_overlap_vs_cloud": 0.733,
+      "mean_score_by_kind": {
+        "same-topic": 7.83,
+        "other-topic": 7.58,
+        "separation": 0.25
+      },
+      "bias_vs_cloud": 2.96,
+      "p_fail_disagree_rate": 0.0,
+      "mae_when_agree": 3.92,
+      "mae_when_disagree": null,
+      "big_errors": 12,
+      "big_errors_caught_by_disagreement": 0,
+      "summaries": [
+        {
+          "wall_ms": 10552,
+          "ok": true,
+          "why": "ok",
+          "out_tok_per_s": 13.7,
+          "text": "PolyKV is a system that allows multiple concurrent inference agents to share a single, asymmetrically compressed key-value cache pool, achieving a stable 2.91x compression ratio across different model scales, context lengths, and agent counts."
+        },
+        {
+          "wall_ms": 8900,
+          "ok": true,
+          "why": "ok",
+          "out_tok_per_s": 13.6,
+          "text": "This research proposes a method called \"Global Retention-Based KV Eviction\" that learns and applies selective, learnable eviction policies for key-value (KV) cache in long-context inference tasks, aiming to improve performance without sacrificing full-cache inference."
+        }
+      ]
+    }
+  }
+}
