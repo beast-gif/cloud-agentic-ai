@@ -24,7 +24,24 @@ Why this design (measured in Step 4.1, 24 real arXiv (topic, paper) pairs):
      a) uncertain band   band_low <= cos <= band_high       (e.g. 0.60 .. 0.68)
      b) shortlist cut    score(rank k) - score(rank k+1) < cut_gap   -> both papers
    capped at max_cloud_calls, run in parallel. The cloud score replaces the local one.
+4. Online recalibration (Step 4.4): shift = median(cloud - local) over the escalated papers
+   is added to every non-escalated local score, so cloud and local scores share one scale.
+       e.g. MoE topic: diffs +1.8 +3.3 +3.7 +3.9 +4.4 -> shift +3.7; a local 7.56 becomes 10
    Typical run: 15 candidates -> 0-3 cloud calls instead of 15.
+
+   Latency budget (Step 4.4, cascade only): before embedding, the router estimates
+       local_est = cache_misses x embed_ms_per_item      (EWMA of measured times)
+       cloud_est = ceil(n / cloud_parallel) x cloud_ms_per_call   (EWMA)
+   and if local_est > latency_budget_ms AND cloud_est < local_est AND money is left,
+   it scores THIS request in the cloud, then embeds the papers in the BACKGROUND so the
+   next request on them is local and cheap.
+       e.g. 16 fresh papers: 16 x 1200 = 19200 ms > 10000 ms; cloud 4 x 1400 = 5600 ms -> cloud
+            same papers again: 0 misses -> 0 ms -> cascade (cheap)
+   EWMA update after every measurement:  m <- 0.3 x new + 0.7 x m
+
+   Embedding cache, two levels (Step 4.4):
+       L1 in-memory LRU (this process)  ->  L2 Postgres table embedding_cache (survives restarts)
+       ->  Ollama (only true misses).  Each text is embedded once, ever.
 
 ------------------------------------------------------------------ task "summarize" (/llm/complete)
    cloud first (fast); on error / timeout / empty / validator failure / budget -> qwen locally.
@@ -47,7 +64,9 @@ Why this design (measured in Step 4.1, 24 real arXiv (topic, paper) pairs):
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import math
 import re
 import threading
 import time
@@ -156,6 +175,11 @@ class VectorCache:
             self.hits += 1
             return v
 
+    def peek(self, k: str) -> Optional[list[float]]:
+        """Like get() but without touching the hit/miss counters (used for estimates)."""
+        with self._lock:
+            return self._d.get(k)
+
     def put(self, k: str, v: list[float]) -> None:
         with self._lock:
             self._d[k] = v
@@ -199,6 +223,18 @@ class Router:
         self.max_cloud_calls = int(rk.get("max_cloud_calls", 6))
         self.embed_chars = int(rk.get("embed_chars", 1600))
         self.cache = VectorCache(int(rk.get("cache_items", 5000)))
+        lb = rk.get("latency_budget_ms")
+        self.latency_budget_ms = float(lb) if lb is not None else None
+        self.embed_ms_ewma = float(rk.get("embed_ms_per_item_initial", 1200))
+        self.cloud_ms_ewma = float(rk.get("cloud_ms_per_call_initial", 1400))
+        self.cloud_parallel = int(rk.get("cloud_parallel", 4))
+        self.warm_in_background = bool(rk.get("warm_cache_in_background", True))
+        self.recalibrate = bool(rk.get("recalibrate", True))
+        self.recal_min_pairs = int(rk.get("recalibrate_min_pairs", 2))
+        self.recal_max_shift = float(rk.get("recalibrate_max_shift", 5.0))
+        self.warmer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="router-warm")
+        self._warming: set[str] = set()          # paper keys queued for background embedding
+        self.db_cache_hits = 0
         self.executor = ThreadPoolExecutor(max_workers=int(rk.get("cloud_parallel", 4)),
                                            thread_name_prefix="router-cloud")
 
@@ -219,7 +255,8 @@ class Router:
 
         self._stats_lock = threading.Lock()
         self.stats = {"rank_requests": 0, "complete_requests": 0, "cloud_calls": 0, "local_chat_calls": 0,
-                      "embed_calls": 0, "escalations": 0, "fallbacks": 0, "failures": 0, "budget_skips": 0}
+                      "embed_calls": 0, "escalations": 0, "fallbacks": 0, "failures": 0, "budget_skips": 0,
+                      "latency_switches": 0, "background_warmups": 0}
 
     # ------------------------------------------------------------------ small helpers
 
@@ -290,13 +327,68 @@ class Router:
 
     # ------------------------------------------------------------------ providers
 
+    @staticmethod
+    def _ewma(old: float, new: float, alpha: float = 0.3) -> float:
+        return alpha * new + (1 - alpha) * old
+
+    def _db_get(self, keys: list[str]) -> dict[str, list[float]]:
+        """Level-2 cache lookup in Postgres. Found vectors are also put into the in-memory LRU."""
+        if not keys:
+            return {}
+        try:
+            with self.pool.connection() as conn:
+                rows = conn.execute(
+                    "UPDATE embedding_cache SET hits = hits + 1, last_used_at = now() "
+                    "WHERE key = ANY(%s) RETURNING key, embedding::text AS v", (keys,)).fetchall()
+        except Exception:  # noqa: BLE001 - a cache problem must never break ranking
+            log.exception("embedding_cache read failed")
+            return {}
+        found = {r["key"]: json.loads(r["v"]) for r in rows}
+        for k, v in found.items():
+            self.cache.put(k, v)
+        return found
+
+    def _db_put(self, items: list[tuple[str, list[float]]]) -> None:
+        if not items:
+            return
+        try:
+            with self.pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        "INSERT INTO embedding_cache (key, model, dim, embedding) VALUES (%s, %s, %s, %s::vector) "
+                        "ON CONFLICT (key) DO NOTHING",
+                        [(k, self.embed_model, len(v), "[" + ",".join(f"{x:.7g}" for x in v) + "]")
+                         for k, v in items])
+        except Exception:  # noqa: BLE001
+            log.exception("embedding_cache write failed")
+
+    def _count_misses(self, texts: list[str], prefix: str) -> int:
+        """How many of these texts would need a NEW embedding (not in memory, not in Postgres)?
+        Loads Postgres hits into memory, so the following _embed() finds them there."""
+        keys = [VectorCache.key(self.embed_model, prefix + t) for t in texts]
+        not_in_mem = [k for k in keys if self.cache.peek(k) is None]
+        found = self._db_get(not_in_mem)
+        with self._stats_lock:
+            self.db_cache_hits += len(found)
+        return len(not_in_mem) - len(found)
+
     def _embed(self, texts: list[str], prefix: str) -> tuple[list[list[float]], float, int]:
-        """Embed texts with the local model, reusing cached vectors. Returns (vectors, ms, cache_hits)."""
+        """Embed texts with the local model, reusing cached vectors (memory, then Postgres).
+        Returns (vectors, ms, cache_hits)."""
         t0 = time.perf_counter()
         keys = [VectorCache.key(self.embed_model, prefix + t) for t in texts]
         out: list[Optional[list[float]]] = [self.cache.get(k) for k in keys]
         missing = [i for i, v in enumerate(out) if v is None]
-        if missing:
+        if missing:                                   # level 2: Postgres
+            found = self._db_get([keys[i] for i in missing])
+            if found:
+                with self._stats_lock:
+                    self.db_cache_hits += len(found)
+                for i in missing:
+                    if keys[i] in found:
+                        out[i] = found[keys[i]]
+                missing = [i for i in missing if out[i] is None]
+        if missing:                                   # level 3: Ollama
             r = self.http_local.post(f"{self.local_url}/api/embed", json={
                 "model": self.embed_model, "keep_alive": self.keep_alive,
                 "input": [prefix + texts[i] for i in missing]})
@@ -307,7 +399,11 @@ class Router:
             for i, v in zip(missing, vecs):
                 out[i] = v
                 self.cache.put(keys[i], v)
+            self._db_put([(keys[i], out[i]) for i in missing])  # type: ignore[misc]
             self._count("embed_calls")
+            per_item = (time.perf_counter() - t0) * 1000.0 / len(missing)
+            with self._stats_lock:
+                self.embed_ms_ewma = self._ewma(self.embed_ms_ewma, per_item)
         return out, (time.perf_counter() - t0) * 1000.0, len(texts) - len(missing)  # type: ignore[return-value]
 
     def _ollama_chat(self, prompt: str, num_predict: int, temperature: float = 0.2) -> dict:
@@ -331,6 +427,8 @@ class Router:
             del key
         ms = (time.perf_counter() - t0) * 1000.0
         self._count("cloud_calls")
+        with self._stats_lock:
+            self.cloud_ms_ewma = self._ewma(self.cloud_ms_ewma, ms)
         if r.status_code >= 400:
             raise RouterUnavailable(f"cloud HTTP {r.status_code}: {r.text[:200]}")
         d = r.json()
@@ -355,7 +453,8 @@ class Router:
     # ================================================================== task: score / rank
 
     def rank(self, user_id: str, session_id: Optional[str], topic: str, papers: list[dict],
-             k: int = 5, mode: Optional[str] = None) -> dict:
+             k: int = 5, mode: Optional[str] = None, latency_budget_ms: Optional[float] = None,
+             recalibrate: Optional[bool] = None) -> dict:
         mode = self.resolve_mode(mode)
         if not topic.strip():
             raise RouterError("topic is empty")
@@ -388,9 +487,29 @@ class Router:
             self._log(user_id=user_id, session_id=session_id, task="score", mode=mode, route="local",
                       kind="embed", model=self.embed_model, outcome="ok" if mode != "cloud" else "fallback",
                       reason=None if mode != "cloud" else "cloud failed for these papers",
-                      items=len(idx) + 1, cache_hits=d_hits + q_hits, latency_ms=q_ms + d_ms)
+                      items=len(idx) + 1, cache_hits=d_hits + q_hits, latency_ms=q_ms + d_ms,
+                      cost_inr=0.0 if self.prices_configured else None)
 
-        if mode in ("local", "cascade"):
+        doc_texts = [it["title"] + ". " + it["abstract"][:self.embed_chars] for it in items]
+        budget_ms = latency_budget_ms if latency_budget_ms is not None else self.latency_budget_ms
+        latency_switch = False
+        if mode == "cascade" and budget_ms is not None:
+            misses = self._count_misses(doc_texts, "search_document: ") + \
+                self._count_misses([topic], "search_query: ")
+            local_est = misses * self.embed_ms_ewma
+            cloud_est = math.ceil(n / self.cloud_parallel) * self.cloud_ms_ewma
+            money_ok, _ = self._cloud_allowed(session_id)
+            latency_switch = local_est > budget_ms and cloud_est < local_est and money_ok
+            summary["latency_estimate"] = {
+                "cache_misses": misses, "embed_ms_per_item": round(self.embed_ms_ewma, 1),
+                "local_est_ms": round(local_est), "cloud_ms_per_call": round(self.cloud_ms_ewma, 1),
+                "cloud_est_ms": round(cloud_est), "budget_ms": budget_ms,
+                "decision": "cloud (local too slow)" if latency_switch else "local embeddings"}
+
+        if latency_switch:
+            self._count("latency_switches")
+            mode_effective = "cloud"
+        elif mode in ("local", "cascade"):
             try:
                 embed_all(list(range(n)))
             except (httpx.HTTPError, RuntimeError) as exc:
@@ -408,7 +527,10 @@ class Router:
         # ---- 2) which papers go to the cloud?
         wanted: list[tuple[int, str]] = []
         if mode_effective == "cloud":
-            wanted = [(i, "mode=cloud" if mode == "cloud" else "embeddings unavailable") for i in range(n)]
+            why_cloud = ("mode=cloud" if mode == "cloud" else
+                         f"latency budget: local est {summary['latency_estimate']['local_est_ms']} ms > "
+                         f"{budget_ms:.0f} ms" if latency_switch else "embeddings unavailable")
+            wanted = [(i, why_cloud) for i in range(n)]
         elif mode_effective == "cascade":
             mid = (self.band_lo + self.band_hi) / 2
             band = sorted((i for i in range(n) if self.band_lo <= items[i]["cosine"] <= self.band_hi),
@@ -495,6 +617,26 @@ class Router:
                 except (httpx.HTTPError, RuntimeError) as exc:
                     raise RouterUnavailable(f"cloud and local both failed: {exc!r}") from exc
 
+        # ---- 4b) online recalibration (Step 4.4): the global cosine->score line was fitted on
+        # 3 topics; some topics sit lower/higher (e.g. MoE papers: cos 0.62-0.80). The cloud
+        # answers we already paid for show the offset for THIS request:
+        #     shift = median(cloud_score - local_score)  over escalated papers (robust to one outlier)
+        # and every NON-escalated local score is moved by it, so both scales agree before sorting.
+        if mode_effective == "cascade" and (self.recalibrate if recalibrate is None else recalibrate):
+            pairs = [(it["local_score"], it["cloud_score"]) for it in items
+                     if it["local_score"] is not None and it["cloud_score"] is not None]
+            if len(pairs) >= self.recal_min_pairs:
+                diffs = sorted(c - l for l, c in pairs)
+                mid = len(diffs) // 2
+                shift = diffs[mid] if len(diffs) % 2 else (diffs[mid - 1] + diffs[mid]) / 2
+                shift = max(-self.recal_max_shift, min(self.recal_max_shift, shift))
+                for it in items:
+                    if it["cloud_score"] is None and it["local_score"] is not None:
+                        it["local_score_raw"] = it["local_score"]
+                        it["local_score"] = round(max(0.0, min(10.0, it["local_score"] + shift)), 2)
+                summary["recalibration"] = {"pairs": len(pairs), "shift": round(shift, 2),
+                                            "diffs": [round(d, 2) for d in diffs]}
+
         # ---- 5) final score = cloud if we have it, else local
         for it in items:
             if it["cloud_score"] is not None:
@@ -507,8 +649,40 @@ class Router:
             it.pop("abstract", None)
 
         summary["latency_ms"] = round((time.perf_counter() - t_start) * 1000.0, 1)
+        if latency_switch and self.warm_in_background:
+            summary["background_warmup"] = self._warm_later(user_id, session_id, mode, topic, doc_texts)
         return {"mode": mode, "effective_mode": mode_effective, "k": k, "topic": topic,
                 "shortlist": [it["id"] for it in ranked[:k]], "papers": ranked, "summary": summary}
+
+    def _warm_later(self, user_id: str, session_id: Optional[str], mode: str, topic: str,
+                    doc_texts: list[str]) -> int:
+        """Embed these papers in the background, so the NEXT request on them stays local + cheap.
+        Returns how many texts were queued."""
+        keys = [VectorCache.key(self.embed_model, "search_document: " + t) for t in doc_texts]
+        with self._stats_lock:
+            todo = [t for t, k in zip(doc_texts, keys) if k not in self._warming and self.cache.peek(k) is None]
+            self._warming.update(keys)
+
+        def job() -> None:
+            t0 = time.perf_counter()
+            try:
+                _, ms_q, _ = self._embed([topic], "search_query: ")
+                _, ms_d, hits = self._embed(todo, "search_document: ")
+                self._count("background_warmups")
+                self._log(user_id=user_id, session_id=session_id, task="score", mode=mode, route="local",
+                          kind="embed", model=self.embed_model, outcome="ok",
+                          reason="background warm-up after latency switch", items=len(todo) + 1,
+                          cache_hits=hits, latency_ms=(time.perf_counter() - t0) * 1000.0,
+                          cost_inr=0.0 if self.prices_configured else None)
+            except Exception:  # noqa: BLE001
+                log.exception("background warm-up failed")
+            finally:
+                with self._stats_lock:
+                    self._warming.difference_update(keys)
+
+        if todo:
+            self.warmer.submit(job)
+        return len(todo)
 
     # ================================================================== task: summarize / generic
 
@@ -643,12 +817,34 @@ class Router:
                      "max_cloud_calls": self.max_cloud_calls, "embed_chars": self.embed_chars},
             "cloud": {"model": self.cloud_model, "max_tokens": self.max_tokens,
                       "retry_multiplier": self.retry_multiplier},
-            "vector_cache": self.cache.stats(),
+            "latency": {"budget_ms": self.latency_budget_ms, "embed_ms_per_item": round(self.embed_ms_ewma, 1),
+                        "cloud_ms_per_call": round(self.cloud_ms_ewma, 1), "cloud_parallel": self.cloud_parallel},
+            "warming_pending": len(self._warming),
+            "vector_cache": {**self.cache.stats(), "postgres_hits": self.db_cache_hits,
+                             "postgres_rows": self._db_rows()},
             "stats": stats,
             "totals": self.totals(),
         }
 
+    def clear_cache(self) -> dict:
+        """Forget every cached embedding (memory + Postgres). For cold-cache benchmarks only."""
+        with self.cache._lock:
+            n_mem = len(self.cache._d)
+            self.cache._d.clear()
+        with self.pool.connection() as conn:
+            n_db = conn.execute("DELETE FROM embedding_cache").rowcount
+        log.warning("embedding cache cleared: %d in memory, %d in Postgres", n_mem, n_db)
+        return {"memory_cleared": n_mem, "postgres_cleared": n_db}
+
+    def _db_rows(self) -> Optional[int]:
+        try:
+            with self.pool.connection() as conn:
+                return conn.execute("SELECT count(*) AS n FROM embedding_cache").fetchone()["n"]
+        except Exception:  # noqa: BLE001
+            return None
+
     def close(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=True)
+        self.warmer.shutdown(wait=False, cancel_futures=True)
         self.http_local.close()
         self.http_cloud.close()

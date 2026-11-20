@@ -1,0 +1,865 @@
+{
+  "started": "2026-11-20T13:36:27",
+  "k": 5,
+  "topics": {
+    "KV cache compression": {
+      "candidates": 14,
+      "own": 10
+    },
+    "speculative decoding": {
+      "candidates": 14,
+      "own": 10
+    },
+    "protein structure prediction": {
+      "candidates": 14,
+      "own": 10
+    },
+    "mixture of experts": {
+      "candidates": 14,
+      "own": 10
+    },
+    "retrieval augmented generation": {
+      "candidates": 14,
+      "own": 10
+    },
+    "diffusion models for image generation": {
+      "candidates": 14,
+      "own": 10
+    }
+  },
+  "router_settings": {
+    "rank": {
+      "calibration": {
+        "cos_low": 0.52,
+        "score_low": 1.09,
+        "cos_high": 0.76,
+        "score_high": 8.92
+      },
+      "uncertain_band": [
+        0.6,
+        0.68
+      ],
+      "cut_gap": 1.5,
+      "max_cloud_calls": 6,
+      "embed_chars": 1600
+    },
+    "latency": {
+      "budget_ms": 10000.0,
+      "embed_ms_per_item": 1200.0,
+      "cloud_ms_per_call": 1400.0,
+      "cloud_parallel": 4
+    },
+    "cloud_model": "anthropic/claude-haiku-5.5"
+  },
+  "cold": {
+    "KV cache compression": {
+      "effective_mode": "cloud",
+      "latency_ms": 6882.9,
+      "cost_inr": 0.068215,
+      "cloud_calls": 14,
+      "latency_estimate": {
+        "cache_misses": 15,
+        "embed_ms_per_item": 1200.0,
+        "local_est_ms": 18000,
+        "cloud_ms_per_call": 1400.0,
+        "cloud_est_ms": 5600,
+        "budget_ms": 10000.0,
+        "decision": "cloud (local too slow)"
+      },
+      "background_warmup": 14,
+      "shortlist": [
+        "2604.24971",
+        "2505.24133",
+        "2410.15252",
+        "2510.00231",
+        "2608.23599"
+      ]
+    },
+    "speculative decoding": {
+      "effective_mode": "cloud",
+      "latency_ms": 19292.9,
+      "cost_inr": 0.070971,
+      "cloud_calls": 14,
+      "latency_estimate": {
+        "cache_misses": 15,
+        "embed_ms_per_item": 1200.0,
+        "local_est_ms": 18000,
+        "cloud_ms_per_call": 1422.6,
+        "cloud_est_ms": 5690,
+        "budget_ms": 10000.0,
+        "decision": "cloud (local too slow)"
+      },
+      "background_warmup": 10,
+      "shortlist": [
+        "2611.05611",
+        "2203.16487",
+        "2605.01106",
+        "2503.00491",
+        "2611.16714"
+      ]
+    },
+    "protein structure prediction": {
+      "effective_mode": "cloud",
+      "latency_ms": 12200.6,
+      "cost_inr": 0.059689,
+      "cloud_calls": 14,
+      "latency_estimate": {
+        "cache_misses": 13,
+        "embed_ms_per_item": 1357.7,
+        "local_est_ms": 17650,
+        "cloud_ms_per_call": 1490.4,
+        "cloud_est_ms": 5962,
+        "budget_ms": 10000.0,
+        "decision": "cloud (local too slow)"
+      },
+      "background_warmup": 10,
+      "shortlist": [
+        "1008.4006",
+        "1206.3509",
+        "2207.07410",
+        "1208.2680",
+        "2307.02169"
+      ]
+    },
+    "mixture of experts": {
+      "effective_mode": "cloud",
+      "latency_ms": 15468.1,
+      "cost_inr": 0.083649,
+      "cloud_calls": 14,
+      "latency_estimate": {
+        "cache_misses": 13,
+        "embed_ms_per_item": 1013.1,
+        "local_est_ms": 13170,
+        "cloud_ms_per_call": 1425.2,
+        "cloud_est_ms": 5701,
+        "budget_ms": 10000.0,
+        "decision": "cloud (local too slow)"
+      },
+      "background_warmup": 10,
+      "shortlist": [
+        "2410.17954",
+        "1806.08200",
+        "2601.15021",
+        "2402.14800",
+        "2312.04693"
+      ]
+    },
+    "retrieval augmented generation": {
+      "effective_mode": "cascade",
+      "latency_ms": 20541.4,
+      "cost_inr": 0.01312,
+      "cloud_calls": 3,
+      "latency_estimate": {
+        "cache_misses": 11,
+        "embed_ms_per_item": 877.4,
+        "local_est_ms": 9652,
+        "cloud_ms_per_call": 1498.5,
+        "cloud_est_ms": 5994,
+        "budget_ms": 10000.0,
+        "decision": "local embeddings"
+      },
+      "background_warmup": null,
+      "shortlist": [
+        "2506.06962",
+        "2402.12317",
+        "2502.00306",
+        "2309.15217",
+        "2411.18583"
+      ]
+    },
+    "diffusion models for image generation": {
+      "effective_mode": "cloud",
+      "latency_ms": 6242.6,
+      "cost_inr": 0.080089,
+      "cloud_calls": 14,
+      "latency_estimate": {
+        "cache_misses": 9,
+        "embed_ms_per_item": 2898.6,
+        "local_est_ms": 26087,
+        "cloud_ms_per_call": 1722.8,
+        "cloud_est_ms": 6891,
+        "budget_ms": 10000.0,
+        "decision": "cloud (local too slow)"
+      },
+      "background_warmup": 8,
+      "shortlist": [
+        "2206.01714",
+        "2403.04279",
+        "2303.07909",
+        "2303.09295",
+        "2406.09416"
+      ]
+    }
+  },
+  "warm": {
+    "KV cache compression": {
+      "cloud_scores": {
+        "2604.24971": 10.0,
+        "2607.01520": 10.0,
+        "2505.24133": 10.0,
+        "2410.15252": 10.0,
+        "2510.00231": 10.0,
+        "2608.23599": 10.0,
+        "2410.00161": 10.0,
+        "2609.03235": 10.0,
+        "2605.09649": 9.0,
+        "2610.31098": 9.0,
+        "2203.16487": 3.0,
+        "2611.05611": 1.0,
+        "1206.3509": 0.0,
+        "2207.07410": 0.0
+      },
+      "local": {
+        "effective_mode": "local",
+        "latency_ms": 10.4,
+        "cost_inr": 0.0,
+        "cloud_calls": 0,
+        "escalated": 0,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "2607.01520",
+          "2510.00231",
+          "2410.00161",
+          "2410.15252",
+          "2505.24133"
+        ]
+      },
+      "cascade_norecal": {
+        "effective_mode": "cascade",
+        "latency_ms": 1992.4,
+        "cost_inr": 0.008424,
+        "cloud_calls": 2,
+        "escalated": 2,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "2607.01520",
+          "2505.24133",
+          "2510.00231",
+          "2410.00161",
+          "2410.15252"
+        ]
+      },
+      "cascade": {
+        "effective_mode": "cascade",
+        "latency_ms": 1316.9,
+        "cost_inr": 0.008424,
+        "cloud_calls": 2,
+        "escalated": 2,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": 0.54,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "2607.01520",
+          "2505.24133",
+          "2510.00231",
+          "2410.00161",
+          "2410.15252"
+        ]
+      },
+      "cloud": {
+        "effective_mode": "cloud",
+        "latency_ms": 5497.6,
+        "cost_inr": 0.060679,
+        "cloud_calls": 14,
+        "escalated": 0,
+        "cache_hits": 0,
+        "embedded": 0,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "2604.24971",
+          "2607.01520",
+          "2505.24133",
+          "2410.15252",
+          "2510.00231"
+        ]
+      }
+    },
+    "speculative decoding": {
+      "cloud_scores": {
+        "2611.05611": 10.0,
+        "2203.16487": 10.0,
+        "2605.01106": 10.0,
+        "2503.00491": 10.0,
+        "2611.16714": 10.0,
+        "2603.03251": 10.0,
+        "2402.01528": 9.0,
+        "2610.22543": 9.0,
+        "2602.13836": 9.0,
+        "2508.17739": 8.0,
+        "2402.14800": 3.0,
+        "2410.17954": 2.0,
+        "1206.3509": 0.0,
+        "2207.07410": 0.0
+      },
+      "local": {
+        "effective_mode": "local",
+        "latency_ms": 8.6,
+        "cost_inr": 0.0,
+        "cloud_calls": 0,
+        "escalated": 0,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 4,
+        "quality_ratio": 0.98,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "2203.16487",
+          "2605.01106",
+          "2503.00491",
+          "2603.03251",
+          "2402.01528"
+        ]
+      },
+      "cascade_norecal": {
+        "effective_mode": "cascade",
+        "latency_ms": 1532.6,
+        "cost_inr": 0.012501,
+        "cloud_calls": 3,
+        "escalated": 3,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 4,
+        "quality_ratio": 0.96,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "2203.16487",
+          "2605.01106",
+          "2503.00491",
+          "2603.03251",
+          "2508.17739"
+        ]
+      },
+      "cascade": {
+        "effective_mode": "cascade",
+        "latency_ms": 1409.3,
+        "cost_inr": 0.012501,
+        "cloud_calls": 3,
+        "escalated": 3,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 4,
+        "quality_ratio": 0.98,
+        "intrusions": 0,
+        "recal_shift": 0.0,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "2203.16487",
+          "2605.01106",
+          "2503.00491",
+          "2603.03251",
+          "2402.01528"
+        ]
+      },
+      "cloud": {
+        "effective_mode": "cloud",
+        "latency_ms": 5352.8,
+        "cost_inr": 0.062846,
+        "cloud_calls": 14,
+        "escalated": 0,
+        "cache_hits": 0,
+        "embedded": 0,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "2611.05611",
+          "2203.16487",
+          "2605.01106",
+          "2503.00491",
+          "2611.16714"
+        ]
+      }
+    },
+    "protein structure prediction": {
+      "cloud_scores": {
+        "1206.3509": 8.0,
+        "2207.07410": 8.0,
+        "1208.2680": 8.0,
+        "1008.4006": 8.0,
+        "2307.02169": 8.0,
+        "1511.08097": 7.0,
+        "1801.09442": 7.0,
+        "2307.02177": 7.0,
+        "1711.10540": 6.0,
+        "2601.00656": 4.0,
+        "2402.14800": 2.0,
+        "2410.17954": 0.0,
+        "2506.06962": 0.0,
+        "2411.18583": 0.0
+      },
+      "local": {
+        "effective_mode": "local",
+        "latency_ms": 17.4,
+        "cost_inr": 0.0,
+        "cloud_calls": 0,
+        "escalated": 0,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 2,
+        "quality_ratio": 0.925,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "1206.3509",
+          "2307.02169",
+          "1801.09442",
+          "2307.02177",
+          "1511.08097"
+        ]
+      },
+      "cascade_norecal": {
+        "effective_mode": "cascade",
+        "latency_ms": 1498.2,
+        "cost_inr": 0.013523,
+        "cloud_calls": 3,
+        "escalated": 3,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 3,
+        "quality_ratio": 0.95,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "1206.3509",
+          "2307.02169",
+          "1801.09442",
+          "2307.02177",
+          "1208.2680"
+        ]
+      },
+      "cascade": {
+        "effective_mode": "cascade",
+        "latency_ms": 1875.7,
+        "cost_inr": 0.013523,
+        "cloud_calls": 3,
+        "escalated": 3,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 3,
+        "quality_ratio": 0.95,
+        "intrusions": 0,
+        "recal_shift": -0.05,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "1206.3509",
+          "2307.02169",
+          "1801.09442",
+          "2307.02177",
+          "1208.2680"
+        ]
+      },
+      "cloud": {
+        "effective_mode": "cloud",
+        "latency_ms": 5517.6,
+        "cost_inr": 0.062683,
+        "cloud_calls": 14,
+        "escalated": 0,
+        "cache_hits": 0,
+        "embedded": 0,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "1206.3509",
+          "2207.07410",
+          "1208.2680",
+          "1008.4006",
+          "2307.02169"
+        ]
+      }
+    },
+    "mixture of experts": {
+      "cloud_scores": {
+        "2410.17954": 10.0,
+        "2603.11114": 10.0,
+        "2402.14800": 9.0,
+        "2312.04693": 9.0,
+        "1806.08200": 9.0,
+        "2503.03213": 9.0,
+        "2601.15021": 9.0,
+        "1902.11104": 8.0,
+        "2508.05993": 7.0,
+        "2604.21478": 6.0,
+        "2506.06962": 3.0,
+        "2411.18583": 2.0,
+        "2303.07909": 2.0,
+        "2403.04279": 1.0
+      },
+      "local": {
+        "effective_mode": "local",
+        "latency_ms": 8.1,
+        "cost_inr": 0.0,
+        "cloud_calls": 0,
+        "escalated": 0,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 5,
+        "quality_ratio": 0.9787,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "1806.08200",
+          "2601.15021",
+          "2503.03213",
+          "2402.14800",
+          "2410.17954"
+        ]
+      },
+      "cascade_norecal": {
+        "effective_mode": "cascade",
+        "latency_ms": 2606.3,
+        "cost_inr": 0.021265,
+        "cloud_calls": 5,
+        "escalated": 5,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 4,
+        "quality_ratio": 0.9787,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "2312.04693",
+          "1806.08200",
+          "2410.17954",
+          "1902.11104",
+          "2603.11114"
+        ]
+      },
+      "cascade": {
+        "effective_mode": "cascade",
+        "latency_ms": 2571.9,
+        "cost_inr": 0.021265,
+        "cloud_calls": 5,
+        "escalated": 5,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 5,
+        "quality_ratio": 0.9787,
+        "intrusions": 0,
+        "recal_shift": 3.7,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "2410.17954",
+          "2402.14800",
+          "2312.04693",
+          "1806.08200",
+          "2503.03213"
+        ]
+      },
+      "cloud": {
+        "effective_mode": "cloud",
+        "latency_ms": 7169.5,
+        "cost_inr": 0.077043,
+        "cloud_calls": 14,
+        "escalated": 0,
+        "cache_hits": 0,
+        "embedded": 0,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "2410.17954",
+          "2603.11114",
+          "2402.14800",
+          "2312.04693",
+          "1806.08200"
+        ]
+      }
+    },
+    "retrieval augmented generation": {
+      "cloud_scores": {
+        "2309.15217": 10.0,
+        "2601.05264": 10.0,
+        "2510.22344": 10.0,
+        "2506.06962": 9.0,
+        "2411.18583": 9.0,
+        "2402.12317": 9.0,
+        "2502.00306": 9.0,
+        "2507.23334": 9.0,
+        "2601.11863": 9.0,
+        "2512.24268": 9.0,
+        "2604.24971": 3.0,
+        "2605.09649": 3.0,
+        "2303.07909": 2.0,
+        "2403.04279": 1.0
+      },
+      "local": {
+        "effective_mode": "local",
+        "latency_ms": 9.7,
+        "cost_inr": 0.0,
+        "cloud_calls": 0,
+        "escalated": 0,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 5,
+        "quality_ratio": 0.9583,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "2506.06962",
+          "2309.15217",
+          "2502.00306",
+          "2402.12317",
+          "2601.11863"
+        ]
+      },
+      "cascade_norecal": {
+        "effective_mode": "cascade",
+        "latency_ms": 1376.4,
+        "cost_inr": 0.01312,
+        "cloud_calls": 3,
+        "escalated": 3,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 5,
+        "quality_ratio": 0.9583,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "2506.06962",
+          "2411.18583",
+          "2507.23334",
+          "2601.11863",
+          "2309.15217"
+        ]
+      },
+      "cascade": {
+        "effective_mode": "cascade",
+        "latency_ms": 1589.6,
+        "cost_inr": 0.01312,
+        "cloud_calls": 3,
+        "escalated": 3,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 5,
+        "quality_ratio": 0.9583,
+        "intrusions": 0,
+        "recal_shift": 2.31,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "2506.06962",
+          "2402.12317",
+          "2502.00306",
+          "2309.15217",
+          "2411.18583"
+        ]
+      },
+      "cloud": {
+        "effective_mode": "cloud",
+        "latency_ms": 7365.2,
+        "cost_inr": 0.07442,
+        "cloud_calls": 14,
+        "escalated": 0,
+        "cache_hits": 0,
+        "embedded": 0,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "2309.15217",
+          "2601.05264",
+          "2510.22344",
+          "2506.06962",
+          "2411.18583"
+        ]
+      }
+    },
+    "diffusion models for image generation": {
+      "cloud_scores": {
+        "2403.04279": 10.0,
+        "2303.07909": 9.0,
+        "2303.09295": 9.0,
+        "2406.09416": 9.0,
+        "2206.01714": 9.0,
+        "2303.02490": 9.0,
+        "2312.08195": 8.0,
+        "2410.19288": 7.0,
+        "2311.13629": 7.0,
+        "2501.13926": 4.0,
+        "2604.24971": 1.0,
+        "2203.16487": 1.0,
+        "2605.09649": 0.0,
+        "2611.05611": 0.0
+      },
+      "local": {
+        "effective_mode": "local",
+        "latency_ms": 8.2,
+        "cost_inr": 0.0,
+        "cloud_calls": 0,
+        "escalated": 0,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "2403.04279",
+          "2303.07909",
+          "2303.09295",
+          "2406.09416",
+          "2206.01714"
+        ]
+      },
+      "cascade_norecal": {
+        "effective_mode": "cascade",
+        "latency_ms": 1452.3,
+        "cost_inr": 0.008032,
+        "cloud_calls": 2,
+        "escalated": 2,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "2403.04279",
+          "2303.07909",
+          "2303.09295",
+          "2406.09416",
+          "2206.01714"
+        ]
+      },
+      "cascade": {
+        "effective_mode": "cascade",
+        "latency_ms": 1480.4,
+        "cost_inr": 0.008032,
+        "cloud_calls": 2,
+        "escalated": 2,
+        "cache_hits": 15,
+        "embedded": 14,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": -0.5,
+        "latency_decision": "local embeddings",
+        "shortlist": [
+          "2206.01714",
+          "2403.04279",
+          "2303.07909",
+          "2303.09295",
+          "2406.09416"
+        ]
+      },
+      "cloud": {
+        "effective_mode": "cloud",
+        "latency_ms": 6046.3,
+        "cost_inr": 0.089689,
+        "cloud_calls": 14,
+        "escalated": 0,
+        "cache_hits": 0,
+        "embedded": 0,
+        "tie_aware_hits": 5,
+        "quality_ratio": 1.0,
+        "intrusions": 0,
+        "recal_shift": null,
+        "latency_decision": null,
+        "shortlist": [
+          "2403.04279",
+          "2303.07909",
+          "2303.09295",
+          "2406.09416",
+          "2206.01714"
+        ]
+      }
+    }
+  },
+  "warmup_wait_s": 21.8,
+  "aggregate_warm": {
+    "local": {
+      "tie_aware_mean": 4.33,
+      "tie_aware_5of5": 4,
+      "quality_ratio_mean": 0.9737,
+      "intrusions_total": 0,
+      "cloud_calls_mean": 0.0,
+      "cost_inr_total": 0.0,
+      "cost_inr_per_rank": 0.0,
+      "latency_p50_ms": 8.6,
+      "latency_p95_ms": 17.4,
+      "cost_vs_cloud": 0.0
+    },
+    "cascade_norecal": {
+      "tie_aware_mean": 4.33,
+      "tie_aware_5of5": 3,
+      "quality_ratio_mean": 0.9745,
+      "intrusions_total": 0,
+      "cloud_calls_mean": 3.0,
+      "cost_inr_total": 0.0769,
+      "cost_inr_per_rank": 0.01281,
+      "latency_p50_ms": 1498.2,
+      "latency_p95_ms": 2606.3,
+      "cost_vs_cloud": 0.18
+    },
+    "cascade": {
+      "tie_aware_mean": 4.5,
+      "tie_aware_5of5": 4,
+      "quality_ratio_mean": 0.9778,
+      "intrusions_total": 0,
+      "cloud_calls_mean": 3.0,
+      "cost_inr_total": 0.0769,
+      "cost_inr_per_rank": 0.01281,
+      "latency_p50_ms": 1480.4,
+      "latency_p95_ms": 2571.9,
+      "cost_vs_cloud": 0.18
+    },
+    "cloud": {
+      "tie_aware_mean": 5.0,
+      "tie_aware_5of5": 6,
+      "quality_ratio_mean": 1.0,
+      "intrusions_total": 0,
+      "cloud_calls_mean": 14.0,
+      "cost_inr_total": 0.4274,
+      "cost_inr_per_rank": 0.07123,
+      "latency_p50_ms": 5517.6,
+      "latency_p95_ms": 7365.2,
+      "cost_vs_cloud": 1.0
+    }
+  },
+  "aggregate_cold": {
+    "switched_to_cloud": 5,
+    "topics": 6,
+    "latency_p50_ms": 12200.6,
+    "cost_inr_total": 0.3757
+  }
+}

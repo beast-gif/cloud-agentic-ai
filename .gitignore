@@ -22,17 +22,26 @@ venv/
 env/
 ENV/
 
-# ---- Secrets / local overrides ----
+# ---- Secrets / local overrides (NEVER commit) ----
+# .env holds VAULT_MASTER_KEY, MCP_GATEWAY_SECRET, NOTIFY_ACCOUNTS.
+# .env.* also covers .env.backup. Provider keys (Velona) live only in the vault (Postgres).
 .env
 .env.*
 !.env.example
 *.local.yaml
 config.local.yaml
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+recovery-key.txt
 
 # ---- Benchmark outputs ----
 # Raw per-run CSVs are large and machine-specific -> not committed.
-# The JSON summaries are small and are your baselines -> committed.
+# The JSON summaries are small and are the results for the README -> committed
+# (phase1_*, memory_scaling_*, redteam_*, gateway_bench_*, llm_probe_*, router_eval_*).
 benchmarks/results/*.csv
+benchmarks/results/tmp/
 
 # ---- Logs ----
 *.log
@@ -47,10 +56,29 @@ logs/
 Thumbs.db
 desktop.ini
 
-# ---- Phase 5 (Firecracker): snapshots, kernels, rootfs images are huge ----
+# ---- Phase 5 (Firecracker): kernels, rootfs images, snapshots are huge ----
+# golden.snap memory files are as large as the VM's RAM (e.g. 512 MB each).
 *.snap
 *.vmstate
 *.mem
 *.ext4
 *.img
+*.qcow2
 vmlinux*
+bzImage*
+firecracker
+firecracker-v*
+jailer
+jailer-v*
+release-v*/
+*.tgz
+*.tar.gz
+fc-host/images/
+fc-host/snapshots/
+fc-host/run/
+*.sock
+
+# ---- VM / install media (Hyper-V fc-host) ----
+*.iso
+*.vhdx
+*.vhd

@@ -45,7 +45,7 @@ MCP gateway (Phase 3, Step 3.3) - for AGENTS, needs  Authorization: Bearer <MEMO
   POST /admin/gateway/refresh        re-read tools/list from the MCP servers
 
 Model router (Phase 4, Step 4.2) - for AGENTS, needs  Authorization: Bearer <MEMORY_TOKEN>
-  POST /llm/rank                     {"topic", "papers": [{"id","title","abstract"}], "k"?, "mode"?}
+  POST /llm/rank                     {"topic", "papers": [{"id","title","abstract"}], "k"?, "mode"?, "latency_budget_ms"?}
   POST /llm/complete                 {"task": "summarize", "input": {"title","abstract"}, "mode"?}
                                      mode = local | cloud | cascade (default: router.mode in config.yaml)
   GET  /sessions/{id}/llm-calls      audit log of one session's model calls (+ totals)
@@ -54,6 +54,7 @@ Model router admin (local testing only, no token):
   POST /admin/llm/complete           same body + "user_id"
   GET  /admin/llm-calls              recent calls (?user_id=)
   GET  /admin/router                 settings, vector cache, counters, totals per task/route
+  POST /admin/router/clear-cache     forget all cached embeddings (cold-cache benchmarks)
 
 Other:
   POST /admin/reconcile              run reconciliation again
@@ -250,6 +251,8 @@ class RankRequest(BaseModel):
     papers: list[PaperIn] = Field(..., min_length=1, max_length=100)
     k: int = Field(5, ge=1, le=50, description="shortlist size (the cut the router protects)")
     mode: Optional[str] = Field(None, examples=["cascade"], description="local | cloud | cascade")
+    latency_budget_ms: Optional[float] = Field(None, ge=0, description="cascade only; default: router.rank.latency_budget_ms")
+    recalibrate: Optional[bool] = Field(None, description="cascade only; default: router.rank.recalibrate")
 
 
 class CompleteRequest(BaseModel):
@@ -528,7 +531,8 @@ def gateway_refresh():
 
 def _rank(user_id: str, session_id: Optional[str], req: RankRequest) -> dict:
     return S.router.rank(user_id, session_id, req.topic, [p.model_dump() for p in req.papers],
-                         k=req.k, mode=req.mode)
+                         k=req.k, mode=req.mode, latency_budget_ms=req.latency_budget_ms,
+                         recalibrate=req.recalibrate)
 
 
 @app.post("/llm/rank")
@@ -575,6 +579,12 @@ def admin_llm_calls(user_id: Optional[str] = None, limit: int = 100):
 @app.get("/admin/router")
 def router_status():
     return S.router.status()
+
+
+@app.post("/admin/router/clear-cache")
+def router_clear_cache():
+    """Benchmarks only: forget all cached embeddings (memory + Postgres)."""
+    return S.router.clear_cache()
 
 
 # ============================================================ metrics / admin

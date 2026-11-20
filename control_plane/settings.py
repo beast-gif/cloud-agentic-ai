@@ -81,6 +81,10 @@ def agent_env(cfg: dict[str, Any]) -> dict[str, str]:
         "MCP_GATEWAY_URL": str(cfg["control_plane"].get("agent_facing_url",
                                                         "http://host.docker.internal:8000")).rstrip("/") + "/mcp",
     }
+    # Phase 4: the model router lives in the control plane (same base URL, same session token)
+    env["LLM_ROUTER_URL"] = str(cfg["control_plane"].get("agent_facing_url",
+                                                         "http://host.docker.internal:8000")).rstrip("/")
+    env["LLM_ROUTER_TIMEOUT_S"] = str((llm.get("router") or {}).get("timeout_s", 180))
     if "mock_latency_ms" in llm:
         env["MOCK_LATENCY_MS"] = str(llm["mock_latency_ms"])
     return env

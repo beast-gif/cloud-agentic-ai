@@ -1,5 +1,6 @@
 """
 Agentic Cloud - Phase 2, Step 2.4 (+ Phase 3, Step 3.4: real tools via the MCP gateway)
+                                  (+ Phase 4, Step 4.3: scoring + summaries via the model router)
 Research-assistant agent as a LangGraph graph - using all three memory layers and MCP tools.
 
 Flow:
@@ -17,6 +18,10 @@ Flow:
                      the gateway fills in the recipient and attaches the API key.
                      If the gateway is unavailable, search falls back to the local mock
                      and the report says so; a failed notification never fails the run.
+  Router (Phase 4) : rank_papers  -> ONE /llm/rank call for all candidates
+                     summarize    -> /llm/complete per selected paper
+                     both in the session's llm_mode (input "llm_mode": local | cloud | cascade);
+                     every score and summary records who produced it (scored_by / summary_by).
 
 await_selection calls interrupt(): the graph PAUSES there and its state is saved as a
 checkpoint in Postgres (keyed by thread_id). The container can then be stopped (FROZEN).
@@ -53,6 +58,8 @@ SCORE_ABSTRACT_CHARS = 800   # real abstracts are long: score on the first part 
 
 class ResearchState(TypedDict, total=False):
     topic: str
+    llm_mode: Optional[str]         # Phase 4: local | cloud | cascade (None = router default)
+    ranking: dict                   # Phase 4: how the shortlist was scored (mode, cloud calls, cost)
     recalled: list[dict]            # L3: related past memories of this user
     candidates: list[dict]          # raw search results
     search_source: str              # arxiv | fallback (papers server placeholder) | mock (gateway unavailable)
@@ -149,13 +156,12 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, mcp: MCPClient,
         skipped = [{"id": p["id"], "title": p["title"]}
                    for p in state["candidates"] if p["id"] in read_ids]
 
-        scored = [
-            {**p, "score": llm.score_relevance(topic, p["title"], p["abstract"][:SCORE_ABSTRACT_CHARS])}
-            for p in fresh
-        ]
+        # Phase 4: ONE call scores all fresh candidates (router decides local / cloud per paper)
+        scored, info = llm.rank(topic, fresh, k=SHORTLIST_SIZE, mode=state.get("llm_mode")) if fresh else ([], {})
         scored.sort(key=lambda p: p["score"], reverse=True)
         shortlist = [{**p, "rank": i + 1} for i, p in enumerate(scored[:SHORTLIST_SIZE])]
-        return {"shortlist": shortlist, "skipped_already_read": skipped}
+        log.info("ranked %d papers: %s", len(fresh), info)
+        return {"shortlist": shortlist, "skipped_already_read": skipped, "ranking": info}
 
     # -------------------------------------------------------------- human in the loop
 
@@ -171,9 +177,12 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, mcp: MCPClient,
                     "year": p["year"],
                     "venue": p["venue"],
                     "score": p["score"],
+                    "scored_by": p.get("scored_by"),
                 }
                 for p in shortlist
             ],
+            # Phase 4: how the shortlist was scored
+            "ranking": state.get("ranking"),
             # where the papers came from: arxiv | fallback | mock
             "search_source": state.get("search_source"),
             "search_note": state.get("search_note"),
@@ -201,6 +210,7 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, mcp: MCPClient,
         summaries = []
         for r in state["selected"]:
             p = by_rank[r]
+            s = llm.summarize_ex(p["title"], p["abstract"][:SCORE_ABSTRACT_CHARS * 2], mode=state.get("llm_mode"))
             summaries.append(
                 {
                     "rank": r,
@@ -209,7 +219,9 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, mcp: MCPClient,
                     "venue": p["venue"],
                     "year": p["year"],
                     "url": p.get("url"),
-                    "summary": llm.summarize(p["title"], p["abstract"][:SCORE_ABSTRACT_CHARS * 2]),
+                    "summary": s["text"],
+                    "summary_by": s["by"],            # cloud:<model> | local:<model> | mock
+                    "summary_cost_inr": s.get("cost_inr"),
                 }
             )
         return {"summaries": summaries}
@@ -232,6 +244,16 @@ def build_graph(llm: LLM, checkpointer, memory: MemoryClient, mcp: MCPClient,
         skipped = state.get("skipped_already_read", [])
         if skipped:
             lines.append("_Skipped (already read before):_ " + "; ".join(x["title"] for x in skipped))
+        # Phase 4: which models did the work (transparency for the user)
+        rk = state.get("ranking") or {}
+        by: dict[str, int] = {}
+        for s in state["summaries"]:
+            by[s.get("summary_by", "?")] = by.get(s.get("summary_by", "?"), 0) + 1
+        lines.append("")
+        lines.append(f"_Models: ranking mode {rk.get('effective_mode') or rk.get('mode') or rk.get('provider')}"
+                     f" ({rk.get('cloud_calls', 0) or 0} cloud call(s)"
+                     + (f", fallback {rk['fallback']}" if rk.get("fallback") else "") + "); summaries "
+                     + ", ".join(f"{n} by {who}" for who, n in by.items()) + "._")
         report = "\n".join(lines).strip()
 
         # Overwriting is idempotent, so a retried node does no harm.

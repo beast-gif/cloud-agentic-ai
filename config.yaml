@@ -55,7 +55,9 @@ lifecycle:
 #   provider: ollama -> local model through Ollama running on your host
 # ---------------------------------------------------------------------------
 llm:
-  provider: mock
+  provider: router                  # mock | ollama | router (Phase 4)
+  router:
+    timeout_s: 180
   ollama:
     # host.docker.internal = your Windows host, as seen from inside a Docker Desktop container
     base_url: http://host.docker.internal:11434
@@ -158,7 +160,7 @@ mcp:
 # ---------------------------------------------------------------------------
 router:
   mode: cascade
-  budget_inr_per_session: 5.0
+  budget_inr_per_session: 5
   local:
     base_url: http://localhost:11434
     embed_model: nomic-embed-text
@@ -174,6 +176,13 @@ router:
     cloud_parallel: 4
     embed_chars: 1600
     cache_items: 5000
+    latency_budget_ms: 10000            # cascade only; null = never switch to the cloud for speed
+    embed_ms_per_item_initial: 1200     # starting estimates, then learned from real calls
+    cloud_ms_per_call_initial: 1400
+    warm_cache_in_background: true
+    recalibrate: true
+    recalibrate_min_pairs: 2
+    recalibrate_max_shift: 5.0
   cloud:
     provider: velona
     url: https://velona.in/v1/chat/completions
@@ -185,8 +194,8 @@ router:
     summary_max_tokens: 300
     generic_max_tokens: 400
     retry_multiplier: 4
-    price_usd_per_mtok: {input: null, output: null}     # <- put your values back
-    usd_inr: null                                       # <- put your value back
+    price_usd_per_mtok: {input: 0.10, output: 0.50}
+    usd_inr: 96.0                                       # <- put your value back
     forex_buffer: 1.005
     platform_fee: 1.07
 

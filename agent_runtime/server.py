@@ -19,7 +19,9 @@ Environment variables (set by the control plane in Step 1.3):
   SESSION_ID          control-plane session id (for logs)
   REQUESTED_AT_MS     epoch ms when the control plane asked Docker to start this container
   PORT                default 8080
-  LLM_PROVIDER        mock | ollama            (default mock)
+  LLM_PROVIDER        mock | ollama | router   (default mock; Phase 4: router)
+  LLM_ROUTER_URL      Phase 4: control plane base URL for /llm/rank + /llm/complete
+  LLM_ROUTER_TIMEOUT_S Phase 4: default 180 (local embeddings / local summaries are slow on CPU)
   OLLAMA_BASE_URL     default http://host.docker.internal:11434
   OLLAMA_MODEL        default llama3.2:3b
   OLLAMA_TEMPERATURE  default 0.2
@@ -133,6 +135,10 @@ def _init_agent() -> None:
             temperature=float(os.environ.get("OLLAMA_TEMPERATURE", "0.2")),
             timeout_s=float(os.environ.get("OLLAMA_TIMEOUT_S", "120")),
             mock_latency_ms=float(os.environ.get("MOCK_LATENCY_MS", "150")),
+            # Phase 4: the model router authenticates the agent with the same session token
+            router_url=os.environ.get("LLM_ROUTER_URL", ""),
+            router_token=os.environ.get("MEMORY_TOKEN", ""),
+            router_timeout_s=float(os.environ.get("LLM_ROUTER_TIMEOUT_S", "180")),
         )
         memory = MemoryClient(
             base_url=os.environ.get("MEMORY_API_URL", ""),
@@ -250,6 +256,7 @@ def _result(thread_id: str, run_ms: float, checkpoint_load_ms: Optional[float] =
             "memories_written": values.get("memories_written", []),
             "search_source": values.get("search_source"),
             "search_note": values.get("search_note"),
+            "ranking": values.get("ranking"),
             "notification": values.get("notification"),
         },
     }
@@ -282,9 +289,15 @@ def task(req: TaskRequest):
             status_code=409,
         )
 
+    # Phase 4: optional routing mode for this session's model calls
+    llm_mode = req.input.get("llm_mode")
+    if llm_mode is not None and llm_mode not in ("local", "cloud", "cascade"):
+        return JSONResponse({"status": "failed", "error": "input.llm_mode must be local | cloud | cascade"},
+                            status_code=400)
+
     start = time.perf_counter()
     try:
-        RT.graph.invoke({"topic": topic}, _config(req.thread_id))
+        RT.graph.invoke({"topic": topic, "llm_mode": llm_mode}, _config(req.thread_id))
     except Exception as exc:  # noqa: BLE001
         log.exception("task failed")
         return JSONResponse({"status": "failed", "error": repr(exc)}, status_code=500)
