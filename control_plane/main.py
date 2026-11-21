@@ -77,6 +77,7 @@ from pydantic import BaseModel, Field
 
 from control_plane.auth import SessionAuth
 from control_plane.docker_driver import DockerDriver
+from control_plane.firecracker_driver import FirecrackerDriver
 from control_plane.embeddings import Embedder, make_embedder, provider_settings
 from control_plane.gateway import Gateway
 from control_plane.idle_reaper import IdleReaper
@@ -101,7 +102,7 @@ log = logging.getLogger("control_plane.main")
 
 class Services:
     store: SessionStore
-    driver: DockerDriver
+    driver: Any                 # DockerDriver or FirecrackerDriver (Phase 5), same methods
     manager: SessionManager
     reaper: IdleReaper
     auth: SessionAuth
@@ -156,8 +157,15 @@ async def lifespan(_: FastAPI):
              "configured" if S.router.prices_configured else "NOT configured (tokens only)",
              S.router.budget_inr)
 
-    S.driver = DockerDriver.from_config(CFG, base_env=agent_env(CFG))
+    # Phase 5: agents as Docker containers (default) or as Firecracker microVMs restored
+    # from golden.snap (driver: firecracker). The lifecycle does not know the difference.
+    driver_kind = str(CFG.get("driver", "docker")).lower()
+    if driver_kind == "firecracker":
+        S.driver = FirecrackerDriver.from_config(CFG, base_env=agent_env(CFG))
+    else:
+        S.driver = DockerDriver.from_config(CFG, base_env=agent_env(CFG))
     S.driver.ensure_ready()
+    log.info("agent driver: %s", driver_kind)
     S.manager = SessionManager(CFG, S.store, S.driver, auth=S.auth)
 
     # fix anything left over from a previous run BEFORE accepting traffic

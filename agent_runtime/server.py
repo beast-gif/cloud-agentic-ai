@@ -33,6 +33,11 @@ Environment variables (set by the control plane in Step 1.3):
                       Phase 3: the same token authenticates the agent to the MCP gateway
   MCP_GATEWAY_URL     Phase 3: the control plane's MCP gateway, e.g. http://host.docker.internal:8000/mcp
   WORKSPACE_DIR       Phase 2: L2 workspace mount, default /workspace
+  FC_PREBIND          Phase 5: "1" = import everything, then wait for POST /bind (golden snapshot)
+  FC_GC_FREEZE        Phase 5: "1" (default) = gc.freeze() before the snapshot (copy-on-write friendly)
+
+Phase 5 endpoint:
+  POST /bind                {"env": {"AGENT_DSN": ..., "SESSION_ID": ..., "MEMORY_TOKEN": ...}}
 """
 
 # ---- timing starts before ANY other import ---------------------------------
@@ -60,6 +65,8 @@ AGENT_DSN = os.environ.get("AGENT_DSN", "")
 SESSION_ID = os.environ.get("SESSION_ID", "local")
 PORT = int(os.environ.get("PORT", "8080"))
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+# Phase 5: Firecracker golden snapshot mode (see _init_agent)
+PREBIND = os.environ.get("FC_PREBIND", "0") == "1"
 
 _requested_at = os.environ.get("REQUESTED_AT_MS")
 REQUESTED_AT_MS: Optional[float] = float(_requested_at) if _requested_at else None
@@ -89,88 +96,128 @@ class Runtime:
         self.mcp = None
         self.Command = None
         self.timings: dict[str, Any] = {}
+        self.prebind = False                 # Phase 5: imports done, waiting for /bind
+        self.bind_lock = threading.Lock()
 
 
 RT = Runtime()
 
 
+class _Mods:
+    """Modules imported by the heavy stage (kept so /bind can use them later)."""
+    dict_row = ConnectionPool = PostgresSaver = Command = None
+    build_graph = LLM = MCPClient = MemoryClient = None
+
+
+def _import_stage() -> float:
+    """Stage 1: heavy imports. Independent of any session -> safe to snapshot (Phase 5)."""
+    t0 = time.perf_counter()
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+    from langgraph.checkpoint.postgres import PostgresSaver
+    from langgraph.types import Command
+
+    from graph import build_graph
+    from llm import LLM
+    from mcp_client import MCPClient
+    from memory_client import MemoryClient
+    _Mods.dict_row, _Mods.ConnectionPool, _Mods.PostgresSaver, _Mods.Command = (
+        dict_row, ConnectionPool, PostgresSaver, Command)
+    _Mods.build_graph, _Mods.LLM, _Mods.MCPClient, _Mods.MemoryClient = (
+        build_graph, LLM, MCPClient, MemoryClient)
+    return time.perf_counter() - t0
+
+
+def _bind_stage() -> tuple[float, float]:
+    """Stage 2: everything that depends on THIS session's environment:
+    Postgres connection + checkpointer, LLM/Memory/MCP clients (token), graph build.
+    Reads os.environ at call time, so /bind can set it first. Returns (db_s, graph_s)."""
+    dsn = os.environ.get("AGENT_DSN", "")
+    if not dsn:
+        raise RuntimeError("AGENT_DSN environment variable is not set")
+    t1 = time.perf_counter()
+    pool = _Mods.ConnectionPool(
+        conninfo=dsn,
+        min_size=1,
+        max_size=4,
+        # settings required by PostgresSaver
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": _Mods.dict_row},
+        open=True,
+    )
+    pool.wait(timeout=30)
+    checkpointer = _Mods.PostgresSaver(pool)
+    checkpointer.setup()  # creates LangGraph tables on first run, no-op afterwards
+    t2 = time.perf_counter()
+
+    llm = _Mods.LLM(
+        provider=os.environ.get("LLM_PROVIDER", "mock"),
+        ollama_base_url=os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434"),
+        ollama_model=os.environ.get("OLLAMA_MODEL", "llama3.2:3b"),
+        temperature=float(os.environ.get("OLLAMA_TEMPERATURE", "0.2")),
+        timeout_s=float(os.environ.get("OLLAMA_TIMEOUT_S", "120")),
+        mock_latency_ms=float(os.environ.get("MOCK_LATENCY_MS", "150")),
+        # Phase 4: the model router authenticates the agent with the same session token
+        router_url=os.environ.get("LLM_ROUTER_URL", ""),
+        router_token=os.environ.get("MEMORY_TOKEN", ""),
+        router_timeout_s=float(os.environ.get("LLM_ROUTER_TIMEOUT_S", "180")),
+    )
+    memory = _Mods.MemoryClient(
+        base_url=os.environ.get("MEMORY_API_URL", ""),
+        token=os.environ.get("MEMORY_TOKEN", ""),
+    )
+    mcp = _Mods.MCPClient(
+        url=os.environ.get("MCP_GATEWAY_URL", ""),
+        token=os.environ.get("MEMORY_TOKEN", ""),
+    )
+    graph = _Mods.build_graph(
+        llm, checkpointer, memory=memory, mcp=mcp,
+        workspace_dir=os.environ.get("WORKSPACE_DIR", "/workspace"),
+    )
+    t3 = time.perf_counter()
+
+    RT.pool, RT.llm, RT.graph, RT.Command = pool, llm, graph, _Mods.Command
+    RT.memory = memory
+    RT.mcp = mcp
+    return t2 - t1, t3 - t2
+
+
 def _init_agent() -> None:
-    """Heavy initialization. Runs in a background thread so /health can answer 503 meanwhile."""
+    """Heavy initialization. Runs in a background thread so /health can answer 503 meanwhile.
+
+    Normal (Docker, Phase 1-4): imports -> bind -> ready.
+    Pre-bind (Firecracker golden snapshot, Phase 5, env FC_PREBIND=1): imports -> gc.freeze()
+    -> STOP and wait for POST /bind. The VM is snapshotted in this state, so every restored
+    clone starts with all imports done and no session data / no open connections inside.
+    """
     try:
-        if not AGENT_DSN:
-            raise RuntimeError("AGENT_DSN environment variable is not set")
+        import_s = _import_stage()
+        RT.timings = {"import_ms": round(_ms(_T_PROCESS, _T_WEB_IMPORTED) + import_s * 1000.0, 1)}
 
-        # Stage 1: heavy imports (LangGraph, Postgres driver, our agent code)
-        t0 = time.perf_counter()
-        from psycopg.rows import dict_row
-        from psycopg_pool import ConnectionPool
-        from langgraph.checkpoint.postgres import PostgresSaver
-        from langgraph.types import Command
+        if PREBIND:
+            import gc
+            if os.environ.get("FC_GC_FREEZE", "1") == "1":
+                # Move every object that exists now into a permanent generation the GC never
+                # scans again. Otherwise the first GC pass after restore writes to (and thereby
+                # copies) nearly every page holding imported objects -> no copy-on-write sharing.
+                gc.collect()
+                gc.freeze()
+                RT.timings["gc_frozen_objects"] = gc.get_freeze_count()
+            RT.prebind = True
+            log.info("pre-bind: imports done, waiting for POST /bind (%s)", RT.timings)
+            return
 
-        from graph import build_graph
-        from llm import LLM
-        from mcp_client import MCPClient
-        from memory_client import MemoryClient
-        t1 = time.perf_counter()
-
-        # Stage 2: connect to Postgres + make sure checkpoint tables exist
-        pool = ConnectionPool(
-            conninfo=AGENT_DSN,
-            min_size=1,
-            max_size=4,
-            # settings required by PostgresSaver
-            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
-            open=True,
-        )
-        pool.wait(timeout=30)
-        checkpointer = PostgresSaver(pool)
-        checkpointer.setup()  # creates LangGraph tables on first run, no-op afterwards
-        t2 = time.perf_counter()
-
-        # Stage 3: LLM client + build/compile the graph
-        llm = LLM(
-            provider=os.environ.get("LLM_PROVIDER", "mock"),
-            ollama_base_url=os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434"),
-            ollama_model=os.environ.get("OLLAMA_MODEL", "llama3.2:3b"),
-            temperature=float(os.environ.get("OLLAMA_TEMPERATURE", "0.2")),
-            timeout_s=float(os.environ.get("OLLAMA_TIMEOUT_S", "120")),
-            mock_latency_ms=float(os.environ.get("MOCK_LATENCY_MS", "150")),
-            # Phase 4: the model router authenticates the agent with the same session token
-            router_url=os.environ.get("LLM_ROUTER_URL", ""),
-            router_token=os.environ.get("MEMORY_TOKEN", ""),
-            router_timeout_s=float(os.environ.get("LLM_ROUTER_TIMEOUT_S", "180")),
-        )
-        memory = MemoryClient(
-            base_url=os.environ.get("MEMORY_API_URL", ""),
-            token=os.environ.get("MEMORY_TOKEN", ""),
-        )
-        mcp = MCPClient(
-            url=os.environ.get("MCP_GATEWAY_URL", ""),
-            token=os.environ.get("MEMORY_TOKEN", ""),
-        )
-        graph = build_graph(
-            llm, checkpointer, memory=memory, mcp=mcp,
-            workspace_dir=os.environ.get("WORKSPACE_DIR", "/workspace"),
-        )
-        t3 = time.perf_counter()
-
+        db_s, graph_s = _bind_stage()
         container_start_ms = (
             round(PROCESS_START_EPOCH_MS - REQUESTED_AT_MS, 1) if REQUESTED_AT_MS else None
         )
-
-        RT.pool, RT.llm, RT.graph, RT.Command = pool, llm, graph, Command
-        RT.memory = memory
-        RT.mcp = mcp
-        RT.timings = {
+        RT.timings.update({
             # docker run requested -> python process started (host and VM clocks may differ slightly)
             "container_start_ms": container_start_ms,
-            # web framework imports + heavy imports
-            "import_ms": round(_ms(_T_PROCESS, _T_WEB_IMPORTED) + _ms(t0, t1), 1),
-            "db_connect_ms": _ms(t1, t2),
-            "graph_build_ms": _ms(t2, t3),
+            "db_connect_ms": round(db_s * 1000.0, 1),
+            "graph_build_ms": round(graph_s * 1000.0, 1),
             # python process start -> agent ready
-            "process_to_ready_ms": _ms(_T_PROCESS, t3),
-        }
+            "process_to_ready_ms": _ms(_T_PROCESS, time.perf_counter()),
+        })
         RT.ready = True
         log.info("agent ready: %s", RT.timings)
 
@@ -209,6 +256,10 @@ class TaskRequest(BaseModel):
 class ResumeRequest(BaseModel):
     thread_id: str
     value: Any
+
+
+class BindRequest(BaseModel):
+    env: dict[str, str]
 
 
 def _config(thread_id: str) -> dict:
@@ -264,6 +315,9 @@ def _result(thread_id: str, run_ms: float, checkpoint_load_ms: Optional[float] =
 
 @app.get("/health")
 def health():
+    if RT.prebind:
+        # Phase 5: imports done, no session yet -> the moment to take the golden snapshot
+        return {"status": "prebind", "timings_ms": RT.timings}
     if not RT.ready:
         return _not_ready()
     return {
@@ -272,6 +326,32 @@ def health():
         "uptime_ms": _ms(_T_PROCESS, time.perf_counter()),
         "timings_ms": RT.timings,
     }
+
+
+@app.post("/bind")
+def bind(req: BindRequest):
+    """Phase 5: give a restored golden-snapshot clone its session (DSN, SESSION_ID, MEMORY_TOKEN,
+    URLs). Allowed exactly once, only in pre-bind mode."""
+    global SESSION_ID
+    with RT.bind_lock:
+        if not RT.prebind:
+            return JSONResponse({"status": "failed", "error": "not in pre-bind mode (or already bound)"},
+                                status_code=409)
+        start = time.perf_counter()
+        os.environ.update({str(k): str(v) for k, v in req.env.items()})
+        SESSION_ID = os.environ.get("SESSION_ID", SESSION_ID)
+        try:
+            db_s, graph_s = _bind_stage()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("bind failed")
+            return JSONResponse({"status": "failed", "error": repr(exc)}, status_code=500)
+        RT.timings.update({"db_connect_ms": round(db_s * 1000.0, 1),
+                           "graph_build_ms": round(graph_s * 1000.0, 1),
+                           "bind_ms": _ms(start, time.perf_counter())})
+        RT.prebind = False
+        RT.ready = True
+        log.info("bound to session %s: %s", SESSION_ID, RT.timings)
+        return {"status": "ok", "session_id": SESSION_ID, "timings_ms": RT.timings}
 
 
 @app.post("/task")

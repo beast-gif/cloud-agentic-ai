@@ -241,6 +241,7 @@ class SessionStore:
         checkpoint_load_ms: Optional[float] = None,
         ready_ms: Optional[float] = None,
         total_ms: Optional[float] = None,
+        **_extra: Any,    # Phase 5: driver-specific timings (e.g. firecracker restore/bind) - API only, not stored
     ) -> None:
         if kind not in ("cold_start", "wake"):
             raise ValueError("kind must be 'cold_start' or 'wake'")

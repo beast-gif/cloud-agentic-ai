@@ -345,6 +345,9 @@ class SessionManager:
             "graph_build_ms": t.get("graph_build_ms"),
             "ready_ms": _ms(t0),
         }
+        if t.get("firecracker"):   # Phase 5: restored from golden.snap -> restore/bind breakdown
+            timings.update({"db_connect_ms": t.get("db_connect_ms"), "bind_ms": t.get("bind_ms"),
+                            "firecracker": t["firecracker"]})
         return started.agent_url, timings
 
     def _call_agent(self, agent_url: str, path: str, body: dict) -> tuple[dict, int]:

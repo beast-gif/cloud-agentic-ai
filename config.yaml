@@ -1,10 +1,10 @@
-# Agentic Cloud configuration (Phases 1-3)
+# Agentic Cloud configuration (Phases 1-5)
 # Read by the control plane (host) and passed to agent containers as environment variables.
 # Secrets do NOT belong here: put them in .env (git-ignored), see .env.example.
 
 project:
   name: agentic-cloud
-  phase: 3
+  phase: 5
 
 # ---------------------------------------------------------------------------
 # Postgres (started by docker-compose.yml)
@@ -48,6 +48,29 @@ lifecycle:
   reaper_interval_s: 5              # how often the idle reaper checks
   health_timeout_s: 60              # max time to wait for a new container's /health
   health_poll_ms: 100               # /health polling interval (sets wake-time resolution)
+
+# ---------------------------------------------------------------------------
+# Phase 5: where agents run
+#   driver: docker       -> one Docker container per session (Phases 1-4)
+#   driver: firecracker  -> one Firecracker microVM per session, RESTORED from golden.snap
+#                           by fc-agent inside the fc-host Hyper-V VM (no boot, no imports)
+#   The lifecycle (freeze/wake), gateway, memory and router work the same with both.
+#
+#   firecracker.agent_url : fc-agent in fc-host (fc-host IP - check after a Windows reboot:
+#                           "ip -4 addr show eth0" inside fc-host)
+#   secret_env            : name of the .env variable holding the shared fc-agent secret
+#   {WIN_HOST}            : replaced INSIDE fc-host with the Windows address on the Hyper-V
+#                           switch (bridge.ps1 forwards :5432 and :8000 there)
+# ---------------------------------------------------------------------------
+driver: firecracker
+firecracker:
+  agent_url: http://172.20.189.74:8090
+  secret_env: FC_AGENT_SECRET
+  golden: golden
+  start_timeout_s: 90
+  health_poll_ms: 50
+  agent_dsn: postgresql://agentic:agentic_dev_pw@{WIN_HOST}:5432/agentic_cloud
+  control_plane_url: http://{WIN_HOST}:8000
 
 # ---------------------------------------------------------------------------
 # LLM used by the demo agent
@@ -195,7 +218,7 @@ router:
     generic_max_tokens: 400
     retry_multiplier: 4
     price_usd_per_mtok: {input: 0.10, output: 0.50}
-    usd_inr: 96.0                                       # <- put your value back
+    usd_inr: 96.0
     forex_buffer: 1.005
     platform_fee: 1.07
 
